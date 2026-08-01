@@ -108,7 +108,7 @@ describe("the watcher", () => {
      * passing locally. Poll for the condition, and only give up after a timeout
      * long enough that a failure means something is genuinely broken.
      */
-    async function waitForDepth(queue: Queue, expected: number, timeoutMs = 10_000): Promise<number> {
+    async function waitForDepth(queue: Queue, expected: number, timeoutMs = 20_000): Promise<number> {
         const deadline = Date.now() + timeoutMs;
         let depth = queue.depth().pending;
         while (Date.now() < deadline && depth < expected) {
@@ -121,6 +121,9 @@ describe("the watcher", () => {
         return queue.depth().pending;
     }
 
+    // Generous timeouts: these wait on the OS, not on our code. bun:test's
+    // 5s default was the binding constraint on the macOS runner, not the
+    // watcher.
     test("a save produces exactly one queue row despite several events", async () => {
         const db = openIndex(":memory:");
         const queue = new Queue(db);
@@ -138,7 +141,7 @@ describe("the watcher", () => {
 
         expect(depth).toBe(1);
         db.close();
-    });
+    }, 30_000);
 
     test("ignored files never reach the queue", async () => {
         const db = openIndex(":memory:");
@@ -176,7 +179,7 @@ describe("the watcher", () => {
         // Three distinct dirty files, not fifteen events.
         expect(depth).toBe(3);
         db.close();
-    });
+    }, 30_000);
 
     test("status reports a degraded watcher rather than failing silently", () => {
         const db = openIndex(":memory:");
