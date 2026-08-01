@@ -29,6 +29,12 @@ plain modifies. This costs us nothing, because the queue treats an event only as
 dirty" and the hash check in [02-queue](02-queue.md) decides what actually happened. Never
 branch on the event type.
 
+**One environment caveat:** GitHub's macOS runners deliver no `fs.watch` events
+at all — zero after 20 s, while the identical test passes on local macOS and on
+Linux CI. It appears to be a limitation of the runner VM rather than of the
+backend, so the event-delivery tests are skipped there and covered everywhere
+else. Worth re-checking before relying on macOS CI for watcher work.
+
 **Verified on Linux.** `recursive: true` was the one open risk in this design — it is
 well-supported on macOS but was historically unimplemented on Linux. CI now runs the full
 watcher suite on `ubuntu-latest` as well as `macos-14`, and both pass, so the single-watch
