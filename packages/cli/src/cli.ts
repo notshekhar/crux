@@ -12,9 +12,11 @@ import { resolve, join } from "node:path";
 import { existsSync } from "node:fs";
 
 import { runUpgrade, getVersion, resolveAvailableUpdate } from "./upgrade.ts";
+import { withProgress } from "./progress.ts";
 import {
     Workspace,
     serveMcp,
+    serveInspector,
     grammarDir,
     LANGUAGES,
     assertCapabilities,
@@ -77,10 +79,13 @@ async function cmdInit(root: string, force: boolean) {
     const missing = missingGrammars();
     if (missing.length > 0) {
         say(dim(`fetching ${missing.length} language grammars from ${grammarSource()}`));
-        const result = await fetchGrammars(missing, (lang) => {
-            if (lang) process.stdout.write(`\r  ${dim(lang)}\x1b[K`);
-        });
-        process.stdout.write("\r\x1b[K");
+        const result = await withProgress("", (bar) =>
+            fetchGrammars(missing, (p) => {
+                if (!p.lang) return;
+                bar.setLabel(`  ${p.lang} ${dim(`(${p.index + 1}/${p.total})`)}`);
+                bar.update(p.bytes, p.contentLength);
+            }),
+        );
         if (result.failed.length > 0) {
             say(yellow(`  could not fetch: ${result.failed.map((f) => f.lang).join(", ")}`));
             say(dim("  those languages will be indexed as plain text until `crux doctor --fetch` succeeds"));
@@ -175,10 +180,13 @@ async function cmdDoctor(root: string, fetchGrammarsRequested: boolean) {
 
     if (missing.length > 0 && fetchGrammarsRequested) {
         say(`  ${dim(`fetching ${missing.length} grammars from ${grammarSource()}`)}`);
-        const result = await fetchGrammars(missing, (lang) => {
-            if (lang) process.stdout.write(`\r  ${dim(`  ${lang}...`)}\x1b[K`);
-        });
-        process.stdout.write("\r\x1b[K");
+        const result = await withProgress("", (bar) =>
+            fetchGrammars(missing, (p) => {
+                if (!p.lang) return;
+                bar.setLabel(`  ${p.lang} ${dim(`(${p.index + 1}/${p.total})`)}`);
+                bar.update(p.bytes, p.contentLength);
+            }),
+        );
         missing = missing.filter((m) => !result.installed.includes(m.lang));
         for (const f of result.failed) say(`  ${red("✗")} ${f.lang}: ${f.error}`);
     }
@@ -312,6 +320,33 @@ async function cmdSymbol(root: string, name: string) {
     ws.close();
 }
 
+async function cmdServe(root: string, port: number) {
+    const ws = new Workspace({ root, readonly: true });
+    const status = ws.status();
+
+    if (status.files === 0) {
+        say(yellow("  nothing indexed here yet"));
+        say(dim("  run: crux init"));
+        ws.close();
+        return;
+    }
+
+    const server = serveInspector(ws, { port });
+    say(
+        `${bold("crux")} inspector — ${status.files.toLocaleString()} files, ${status.symbols.toLocaleString()} symbols`,
+    );
+    say();
+    say(`  ${green("→")} http://localhost:${server.port}`);
+    say(dim("  loopback only — the index holds your source"));
+    say();
+    say(dim("  ctrl-c to stop"));
+
+    process.on("SIGINT", () => {
+        ws.close();
+        process.exit(0);
+    });
+}
+
 async function cmdMcp(root: string) {
     // stdout is the MCP protocol channel from here on — never write to it.
     const ws = new Workspace({ root });
@@ -346,6 +381,7 @@ const HELP = `${bold("crux")} — a local-first context engine for coding agents
 ${bold("usage")}
   crux init [path]              index a workspace and print agent config
   crux mcp [path]               serve over MCP on stdio (what agents run)
+  crux serve [path]             open the index inspector in a browser
   crux search <query> [path]    search from the terminal
   crux symbol <name> [path]     look up a symbol
   crux status [path]            what is indexed and how fresh
@@ -394,6 +430,11 @@ async function main() {
             return cmdInit(resolve(positional[0] ?? process.cwd()), rest.includes("--force"));
         case "mcp":
             return cmdMcp(resolve(positional[0] ?? process.cwd()));
+        case "serve": {
+            const at = rest.findIndex((a) => a === "-p" || a === "--port");
+            const port = at >= 0 ? Number(rest[at + 1]) || 4319 : 4319;
+            return cmdServe(resolve(positional[0] ?? process.cwd()), port);
+        }
         case "doctor":
             return cmdDoctor(resolve(positional[0] ?? process.cwd()), rest.includes("--fetch"));
         case "status":

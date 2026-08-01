@@ -29,9 +29,22 @@ crux search "retry webhooks"
 crux symbol RetryPolicy
 crux status                 # what's indexed, how fresh
 crux list                   # every workspace you've indexed
+crux serve .                # browse the index in a browser
 crux mcp .                  # what your agent runs
 crux upgrade                # update in place
 ```
+
+## Inspecting the index
+
+`crux serve` opens a local inspector — loopback only, since the index holds
+your source:
+
+- **Graph** — the import graph, as modules or individual files, force-directed.
+  Hubs are highlighted; isolated files are counted rather than drawn.
+- **Search** — the same three-arm search the agent gets, showing which arms matched.
+- **Files** — per file: every symbol, and the chunk boundaries search actually uses.
+- **Symbols** — definitions, callers, callees. Labelled heuristic until SCIP lands.
+- **Inspect** — what is in the index, per-tier coverage, and storage by table.
 
 Uninstall with `CRUX_UNINSTALL=1 bash install.sh`.
 

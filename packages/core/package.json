@@ -1,6 +1,6 @@
 {
     "name": "@notshekhar/crux-core",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "description": "Core engine for crux — durable queue, leader election, index storage, retrieval.",
     "license": "MIT",
     "type": "module",

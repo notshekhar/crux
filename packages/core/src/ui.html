@@ -1,0 +1,652 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>crux — index inspector</title>
+<style>
+  :root {
+    --bg: #0d0f12;
+    --panel: #14171c;
+    --panel-2: #191d23;
+    --line: #242a33;
+    --text: #e4e7eb;
+    --muted: #8b939f;
+    --dim: #5a626d;
+    --accent: #f0a868;
+    --accent-dim: #8a6440;
+    --blue: #6ba5d8;
+    --green: #7fb883;
+    --red: #d8756b;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 13px/1.5 var(--mono);
+    height: 100vh; display: grid; grid-template-columns: 210px 1fr;
+    overflow: hidden;
+  }
+
+  /* ── nav ───────────────────────────────────────────────── */
+  nav { background: var(--panel); border-right: 1px solid var(--line); padding: 14px 0; overflow-y: auto; }
+  .brand { padding: 0 16px 14px; font-size: 15px; font-weight: 600; letter-spacing: .02em; }
+  .brand span { color: var(--accent); }
+  .brand small { display: block; color: var(--dim); font-size: 11px; font-weight: 400; margin-top: 3px;
+                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  nav button {
+    display: block; width: 100%; text-align: left; padding: 7px 16px;
+    background: none; border: 0; color: var(--muted); font: inherit; cursor: pointer;
+    border-left: 2px solid transparent;
+  }
+  nav button:hover { color: var(--text); background: var(--panel-2); }
+  nav button[aria-current="true"] { color: var(--accent); border-left-color: var(--accent); background: var(--panel-2); }
+  .nav-head { padding: 14px 16px 5px; color: var(--dim); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
+  .stat { padding: 3px 16px; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; }
+  .stat b { color: var(--text); font-weight: 500; }
+
+  /* ── main ──────────────────────────────────────────────── */
+  main { overflow: hidden; display: flex; flex-direction: column; }
+  .bar {
+    display: flex; gap: 10px; align-items: center;
+    padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+    flex-shrink: 0;
+  }
+  .bar input {
+    flex: 1; background: var(--bg); border: 1px solid var(--line); color: var(--text);
+    padding: 6px 10px; border-radius: 4px; font: inherit;
+  }
+  .bar input:focus { outline: none; border-color: var(--accent-dim); }
+  .bar label { color: var(--dim); font-size: 11px; display: flex; align-items: center; gap: 5px; }
+  .bar select {
+    background: var(--bg); border: 1px solid var(--line); color: var(--text);
+    padding: 5px 7px; border-radius: 4px; font: inherit; font-size: 11px;
+  }
+  .view { flex: 1; overflow: auto; padding: 16px; }
+  .view.flush { padding: 0; position: relative; }
+
+  h2 { font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: .12em;
+       margin: 0 0 10px; font-weight: 500; }
+  h2:not(:first-child) { margin-top: 26px; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; color: var(--dim); font-weight: 500; font-size: 11px;
+       padding: 5px 10px 5px 0; border-bottom: 1px solid var(--line); }
+  td { padding: 4px 10px 4px 0; border-bottom: 1px solid #1a1e24; vertical-align: top; }
+  tr:hover td { background: #16191f; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .clickable { cursor: pointer; color: var(--blue); }
+  .clickable:hover { text-decoration: underline; }
+
+  .tag { display: inline-block; padding: 0 5px; border-radius: 3px; font-size: 10px;
+         background: #202630; color: var(--muted); }
+  .tag.exported { background: #1e2f22; color: var(--green); }
+  .tag.warn { background: #2f2420; color: var(--accent); }
+
+  .meter { height: 5px; background: #202630; border-radius: 3px; overflow: hidden; min-width: 90px; }
+  .meter > i { display: block; height: 100%; background: var(--accent); }
+
+  canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+
+  .detail {
+    position: absolute; top: 12px; right: 12px; width: 330px; max-height: calc(100% - 24px);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 13px; overflow-y: auto; font-size: 12px;
+    box-shadow: 0 10px 32px rgba(0,0,0,.5);
+  }
+  .detail h3 { font-size: 12px; margin-bottom: 8px; word-break: break-all; color: var(--accent); }
+  .detail .row { display: flex; justify-content: space-between; color: var(--muted); padding: 2px 0; gap: 10px; }
+  .detail .row b { color: var(--text); font-weight: 500; text-align: right; word-break: break-all; }
+  .detail ul { list-style: none; margin-top: 6px; }
+  .detail li { padding: 2px 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .close { position: absolute; top: 8px; right: 10px; background: none; border: 0;
+           color: var(--dim); cursor: pointer; font-size: 15px; }
+  .close:hover { color: var(--text); }
+
+  .legend {
+    position: absolute; bottom: 12px; left: 12px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 6px; padding: 9px 11px;
+    font-size: 11px; color: var(--muted); line-height: 1.7;
+  }
+  .legend b { color: var(--text); font-weight: 500; }
+
+  .empty { color: var(--dim); padding: 28px 0; text-align: center; }
+  .note { color: var(--dim); font-size: 11px; margin-top: 6px; }
+  code { background: #1a1e24; padding: 1px 4px; border-radius: 3px; color: var(--accent); }
+  .span-text {
+    background: #101318; border: 1px solid var(--line); border-radius: 4px;
+    padding: 7px 9px; margin-top: 5px; white-space: pre; overflow-x: auto;
+    color: var(--muted); font-size: 11px; line-height: 1.45;
+  }
+  .hit { padding: 9px 0; border-bottom: 1px solid #1a1e24; }
+  .hit-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<nav>
+  <div class="brand">cr<span>u</span>x<small id="ws">…</small></div>
+  <button data-view="graph" aria-current="true">Graph</button>
+  <button data-view="search">Search</button>
+  <button data-view="files">Files</button>
+  <button data-view="symbols">Symbols</button>
+  <button data-view="inspect">Inspect</button>
+  <div class="nav-head">index</div>
+  <div id="stats"></div>
+</nav>
+
+<main>
+  <div class="bar" id="bar"></div>
+  <div class="view" id="view"><div class="empty">loading…</div></div>
+</main>
+
+<script>
+const $ = (sel, root = document) => root.querySelector(sel);
+const el = (tag, props = {}, ...kids) => {
+  const n = Object.assign(document.createElement(tag), props);
+  for (const k of kids.flat()) n.append(k?.nodeType ? k : document.createTextNode(String(k ?? "")));
+  return n;
+};
+const api = (path) => fetch(path).then((r) => r.json());
+const fmt = (n) => (n ?? 0).toLocaleString();
+const mb = (b) => (b / 1e6).toFixed(1) + " MB";
+
+let state = { view: "graph", overview: null };
+
+// ── nav ──────────────────────────────────────────────────────
+for (const b of document.querySelectorAll("nav button[data-view]")) {
+  b.onclick = () => show(b.dataset.view);
+}
+function show(view) {
+  state.view = view;
+  // Reflected in the URL so a view can be linked to and survives a reload.
+  if (location.hash.slice(1) !== view) history.replaceState(null, "", `#${view}`);
+  for (const b of document.querySelectorAll("nav button[data-view]")) {
+    b.setAttribute("aria-current", String(b.dataset.view === view));
+  }
+  $("#bar").innerHTML = "";
+  $("#view").className = "view";
+  ({ graph: viewGraph, search: viewSearch, files: viewFiles, symbols: viewSymbols, inspect: viewInspect })[view]();
+}
+
+async function boot() {
+  const o = await api("/api/overview");
+  state.overview = o;
+  $("#ws").textContent = o.workspace;
+  $("#ws").title = o.workspace;
+  $("#stats").replaceChildren(
+    stat("files", fmt(o.files)),
+    stat("symbols", fmt(o.symbols)),
+    stat("chunks", fmt(o.chunks)),
+    stat("size", mb(o.indexBytes)),
+    stat("queue", o.queue.pending ? fmt(o.queue.pending) + " pending" : "idle"),
+  );
+  const wanted = location.hash.slice(1);
+  show(["graph", "search", "files", "symbols", "inspect"].includes(wanted) ? wanted : "graph");
+}
+window.onhashchange = () => {
+  const v = location.hash.slice(1);
+  if (v && v !== state.view) show(v);
+};
+const stat = (k, v) => el("div", { className: "stat" }, k, el("b", {}, v));
+
+// ── graph ────────────────────────────────────────────────────
+async function viewGraph() {
+  const bar = $("#bar");
+  const startFile = new URLSearchParams(location.search).get("g") === "file";
+  const gran = el("select", {},
+    el("option", { value: "module", selected: !startFile }, "modules"),
+    el("option", { value: "file", selected: startFile }, "files"));
+  const depth = el("select", {}, ...[1, 2, 3, 4].map((d) => el("option", { value: d, selected: d === 2 }, d)));
+  const max = el("select", {}, ...[50, 100, 250, 500].map((m) => el("option", { value: m, selected: m === 250 }, m)));
+  const depthLabel = el("label", {}, "depth", depth);
+  bar.append(
+    el("label", {}, "show", gran),
+    depthLabel,
+    el("label", {}, "max", max),
+    el("span", { className: "note", id: "gnote" }, ""),
+  );
+
+  const view = $("#view");
+  view.className = "view flush";
+  const canvas = el("canvas");
+  view.replaceChildren(canvas);
+
+  let firstLoad = true;
+  const load = async () => {
+    // Depth only means anything when aggregating into modules.
+    depthLabel.style.display = gran.value === "file" ? "none" : "";
+
+    let g = await api(`/api/graph?depth=${depth.value}&max=${max.value}&granularity=${gran.value}`);
+
+    // A single package aggregates into one module whose imports are all
+    // internal, so the module view is empty and looks broken. Drop to files
+    // once, on first load, rather than opening on a blank canvas.
+    if (firstLoad && gran.value === "module" && g.edges.length === 0 && g.nodes.length > 0) {
+      gran.value = "file";
+      depthLabel.style.display = "none";
+      g = await api(`/api/graph?max=${max.value}&granularity=file`);
+    }
+    firstLoad = false;
+    const unit = gran.value === "file" ? "files" : "modules";
+    $("#gnote").textContent =
+      `${g.nodes.length} ${unit} · ${g.edges.length} import edges` +
+      (g.isolated ? ` · ${g.isolated} isolated hidden` : "") +
+      (g.truncated ? " · truncated" : "");
+
+    if (!g.nodes.length) {
+      view.replaceChildren(el("div", { className: "empty" },
+        g.isolated
+          ? `no import relationships found between these ${unit} — ${g.isolated} isolated`
+          : "nothing indexed yet — run crux init"));
+      return;
+    }
+    view.replaceChildren(canvas, legend(gran.value === "file"));
+    draw(canvas, g);
+  };
+  gran.onchange = depth.onchange = max.onchange = load;
+  load();
+}
+
+const legend = (perFile) =>
+  el("div", { className: "legend" },
+    el("div", {}, el("b", {}, "drag"), " to pan · ", el("b", {}, "scroll"), " to zoom"),
+    el("div", {}, el("b", {}, "click"), " a ", perFile ? "file" : "module", " for detail"),
+    el("div", {}, perFile ? "size = symbols" : "size = files", " · line = imports · ",
+      el("span", { style: "color:var(--blue)" }, "blue"), " = hub"));
+
+/**
+ * A small force-directed layout. Barnes-Hut would be the right answer at
+ * 10k nodes, but the graph is aggregated to a few hundred before it gets here,
+ * so plain O(n²) repulsion is simpler and fast enough.
+ */
+function draw(canvas, g) {
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  let W = 0, H = 0;
+
+  const resize = () => {
+    W = canvas.clientWidth; H = canvas.clientHeight;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  };
+  resize();
+  new ResizeObserver(resize).observe(canvas);
+
+  const nodes = g.nodes.map((n, i) => ({
+    ...n,
+    // Seed on a circle: a random start makes the first second look like an
+    // explosion, and identical starts make the forces degenerate.
+    x: W / 2 + Math.cos((i / g.nodes.length) * Math.PI * 2) * Math.min(W, H) * 0.3,
+    y: H / 2 + Math.sin((i / g.nodes.length) * Math.PI * 2) * Math.min(W, H) * 0.3,
+    vx: 0, vy: 0,
+    r: Math.max(4, Math.min(26, 3.5 * Math.sqrt(n.weight))),
+  }));
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const links = g.edges.map((e) => ({ s: byId.get(e.source), t: byId.get(e.target), w: e.weight })).filter((l) => l.s && l.t);
+
+  const degree = new Map();
+  for (const l of links) {
+    degree.set(l.s.id, (degree.get(l.s.id) ?? 0) + 1);
+    degree.set(l.t.id, (degree.get(l.t.id) ?? 0) + 1);
+  }
+
+  let view = { x: 0, y: 0, k: 1 };
+  let hover = null, selected = null, alpha = 1;
+  let userMoved = false;
+
+  /**
+   * Fit everything into the canvas.
+   *
+   * Repulsion from unconnected nodes pushes the connected cluster off-centre,
+   * so a fixed centring force is not enough — the reliable fix is to frame the
+   * actual bounding box once the layout settles. Stops as soon as the user
+   * pans or zooms; refitting under their hands would be maddening.
+   */
+  const fit = () => {
+    if (userMoved || !nodes.length) return;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of nodes) {
+      minX = Math.min(minX, n.x - n.r); maxX = Math.max(maxX, n.x + n.r);
+      minY = Math.min(minY, n.y - n.r); maxY = Math.max(maxY, n.y + n.r);
+    }
+    const pad = 60;
+    const k = Math.min((W - pad * 2) / Math.max(1, maxX - minX), (H - pad * 2) / Math.max(1, maxY - minY), 2.5);
+    view.k = k;
+    view.x = (W - (maxX + minX) * k) / 2;
+    view.y = (H - (maxY + minY) * k) / 2;
+  };
+
+  canvas.onwheel = (e) => {
+    e.preventDefault();
+    userMoved = true;
+    const f = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+    view.k = Math.max(0.15, Math.min(6, view.k * f));
+  };
+  let drag = null;
+  canvas.onmousedown = (e) => (drag = { x: e.clientX - view.x, y: e.clientY - view.y, moved: false });
+  canvas.onmouseup = () => (drag = null);
+  canvas.onmouseleave = () => { drag = null; hover = null; };
+  canvas.onmousemove = (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left - view.x) / view.k;
+    const my = (e.clientY - rect.top - view.y) / view.k;
+    if (drag) { view.x = e.clientX - drag.x; view.y = e.clientY - drag.y; drag.moved = userMoved = true; return; }
+    hover = nodes.find((n) => (n.x - mx) ** 2 + (n.y - my) ** 2 < (n.r + 4) ** 2) ?? null;
+    canvas.style.cursor = hover ? "pointer" : "grab";
+  };
+  canvas.onclick = () => {
+    if (drag?.moved) return;
+    selected = hover;
+    if (selected) selected.kind === "file" ? (show("files"), setTimeout(() => openFile(selected.id), 30)) : openModule(selected);
+  };
+
+  const step = () => {
+    if (alpha > 0.005) {
+      alpha *= 0.985;
+      const k = alpha * 0.9;
+
+      for (let i = 0; i < nodes.length; i++) {
+        const a = nodes[i];
+        for (let j = i + 1; j < nodes.length; j++) {
+          const b = nodes[j];
+          let dx = b.x - a.x, dy = b.y - a.y;
+          let d2 = dx * dx + dy * dy || 0.01;
+          // Cheap cutoff: beyond this distance the force is noise.
+          if (d2 > 360000) continue;
+          const f = (2200 * k) / d2;
+          const d = Math.sqrt(d2);
+          const fx = (dx / d) * f, fy = (dy / d) * f;
+          a.vx -= fx; a.vy -= fy; b.vx += fx; b.vy += fy;
+        }
+      }
+      for (const l of links) {
+        const dx = l.t.x - l.s.x, dy = l.t.y - l.s.y;
+        const d = Math.hypot(dx, dy) || 0.01;
+        const f = ((d - 110) * 0.012 * k) * Math.min(3, l.w);
+        const fx = (dx / d) * f, fy = (dy / d) * f;
+        l.s.vx += fx; l.s.vy += fy; l.t.vx -= fx; l.t.vy -= fy;
+      }
+      for (const n of nodes) {
+        n.vx += (W / 2 - n.x) * 0.0012 * k;
+        n.vy += (H / 2 - n.y) * 0.0012 * k;
+        n.x += n.vx *= 0.82;
+        n.y += n.vy *= 0.82;
+      }
+      fit();
+    }
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.save();
+    ctx.translate(view.x, view.y);
+    ctx.scale(view.k, view.k);
+
+    const focus = hover ?? selected;
+    const near = focus ? new Set(links.filter((l) => l.s === focus || l.t === focus).flatMap((l) => [l.s.id, l.t.id])) : null;
+
+    for (const l of links) {
+      const lit = focus && (l.s === focus || l.t === focus);
+      ctx.strokeStyle = lit ? "rgba(240,168,104,.55)" : focus ? "rgba(90,98,109,.10)" : "rgba(90,98,109,.26)";
+      ctx.lineWidth = lit ? Math.min(2.5, 0.6 + l.w * 0.12) : 0.55;
+      ctx.beginPath();
+      ctx.moveTo(l.s.x, l.s.y);
+      ctx.lineTo(l.t.x, l.t.y);
+      ctx.stroke();
+    }
+
+    for (const n of nodes) {
+      const lit = !focus || n === focus || near?.has(n.id);
+      ctx.globalAlpha = lit ? 1 : 0.18;
+      ctx.fillStyle = n === focus ? "#f0a868" : degree.get(n.id) > 6 ? "#6ba5d8" : "#4d5661";
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (view.k > 0.55 && (n.r > 8 || n === focus || (near?.has(n.id) && view.k > 1))) {
+        ctx.fillStyle = n === focus ? "#e4e7eb" : "#8b939f";
+        ctx.font = `${Math.max(9, 11 / view.k) * view.k}px ui-monospace, monospace`;
+        ctx.textAlign = "center";
+        const label = n.label.length > 26 ? "…" + n.label.slice(-25) : n.label;
+        ctx.fillText(label, n.x, n.y + n.r + 11);
+      }
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
+    requestAnimationFrame(step);
+  };
+  step();
+}
+
+async function openModule(node) {
+  const panel = el("div", { className: "detail" });
+  panel.append(
+    el("button", { className: "close", textContent: "×", onclick: () => panel.remove() }),
+    el("h3", {}, node.label),
+    el("div", { className: "row" }, "files", el("b", {}, fmt(node.weight))),
+    el("div", { className: "row" }, "symbols", el("b", {}, fmt(node.symbols ?? 0))),
+  );
+  $("#view").append(panel);
+
+  const { files } = await api(`/api/files?prefix=${encodeURIComponent(node.id)}`);
+  panel.append(
+    el("h2", { style: "margin-top:14px" }, "files"),
+    el("ul", {}, ...files.slice(0, 60).map((f) =>
+      el("li", { className: "clickable", title: f.path, onclick: () => { show("files"); setTimeout(() => openFile(f.path), 30); } },
+        f.path.slice(node.id.length + 1) || f.path))),
+  );
+}
+
+// ── search ───────────────────────────────────────────────────
+function viewSearch() {
+  const input = el("input", { placeholder: "where do we retry webhooks…", autofocus: true });
+  $("#bar").append(input);
+  const view = $("#view");
+  view.replaceChildren(el("div", { className: "empty" }, "type to search"));
+
+  let timer;
+  input.oninput = () => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      const q = input.value.trim();
+      if (!q) return view.replaceChildren(el("div", { className: "empty" }, "type to search"));
+      const { spans } = await api(`/api/search?q=${encodeURIComponent(q)}`);
+      if (!spans.length) return view.replaceChildren(el("div", { className: "empty" }, "no matches"));
+      view.replaceChildren(...spans.map((s) =>
+        el("div", { className: "hit" },
+          el("div", { className: "hit-head" },
+            el("span", { className: "clickable", onclick: () => { show("files"); setTimeout(() => openFile(s.path), 30); } },
+              `${s.path}:${s.startLine}-${s.endLine}`),
+            ...s.why.matched.map((m) => el("span", { className: "tag" }, m)),
+            s.symbol ? el("span", { className: "tag exported" }, s.symbol) : ""),
+          s.text ? el("div", { className: "span-text" }, s.text.split("\n").slice(0, 12).join("\n")) : "")));
+    }, 160);
+  };
+  input.focus();
+}
+
+// ── files ────────────────────────────────────────────────────
+async function viewFiles() {
+  const input = el("input", { placeholder: "filter by path prefix…" });
+  $("#bar").append(input);
+  const view = $("#view");
+
+  const load = async () => {
+    const { files } = await api(`/api/files?prefix=${encodeURIComponent(input.value.trim())}`);
+    if (!files.length) return view.replaceChildren(el("div", { className: "empty" }, "no files"));
+    view.replaceChildren(
+      el("table", {},
+        el("thead", {}, el("tr", {},
+          el("th", {}, "path"), el("th", {}, "lang"), el("th", {}, "state"))),
+        el("tbody", {}, ...files.map((f) =>
+          el("tr", {},
+            el("td", { className: "clickable", onclick: () => openFile(f.path) }, f.path),
+            el("td", {}, el("span", { className: "tag" }, f.lang ?? "—")),
+            el("td", {}, f.skipReason
+              ? el("span", { className: "tag warn" }, f.skipReason)
+              : el("span", { className: "tag" }, f.parseState ?? "—")))))),
+    );
+  };
+  let t;
+  input.oninput = () => { clearTimeout(t); t = setTimeout(load, 160); };
+  load();
+}
+
+async function openFile(path) {
+  const d = await api(`/api/file?path=${encodeURIComponent(path)}`);
+  const view = $("#view");
+  if (d.error) return view.replaceChildren(el("div", { className: "empty" }, `${path}: ${d.error}`));
+
+  view.replaceChildren(
+    el("h2", {}, path),
+    el("div", { className: "note" },
+      `${d.lang ?? "no grammar"} · ${d.symbols.length} symbols · ${d.chunks.length} chunks · ${d.parseState}`),
+
+    el("h2", {}, "symbols"),
+    d.symbols.length
+      ? el("table", {},
+          el("thead", {}, el("tr", {}, el("th", { className: "num" }, "line"), el("th", {}, "kind"), el("th", {}, "name"), el("th", {}, "signature"))),
+          el("tbody", {}, ...d.symbols.map((s) =>
+            el("tr", {},
+              el("td", { className: "num" }, s.line),
+              el("td", {}, el("span", { className: "tag" }, s.kind)),
+              el("td", { className: "clickable", onclick: () => { show("symbols"); setTimeout(() => openSymbol(s.name), 30); } },
+                s.name, s.exported ? " " : "", s.exported ? el("span", { className: "tag exported" }, "export") : ""),
+              el("td", { style: "color:var(--dim)" }, (s.signature ?? "").slice(0, 90))))))
+      : el("div", { className: "empty" }, "no symbols — indexed as text"),
+
+    el("h2", {}, "chunk boundaries"),
+    el("div", { className: "note" }, "how the file was split for search — boundaries come from the AST, never a character count"),
+    el("table", {},
+      el("tbody", {}, ...d.chunks.map((c) =>
+        el("tr", {},
+          el("td", { className: "num", style: "width:110px" }, `${c.startLine}–${c.endLine}`),
+          el("td", { style: "color:var(--dim)" }, c.hash))))),
+
+    el("h2", {}, `imports (${d.imports.length})`),
+    el("ul", {}, ...d.imports.map((i) => el("li", { style: "color:var(--muted)" }, i))),
+
+    el("h2", {}, `imported by (${d.importedBy.length})`),
+    el("div", { className: "note" }, "approximate: Tier 1 specifiers are unresolved until SCIP lands"),
+    el("ul", {}, ...d.importedBy.map((p) =>
+      el("li", { className: "clickable", onclick: () => openFile(p) }, p))),
+  );
+}
+
+// ── symbols ──────────────────────────────────────────────────
+function viewSymbols() {
+  const input = el("input", { placeholder: "symbol name…", autofocus: true });
+  $("#bar").append(input);
+  $("#view").replaceChildren(el("div", { className: "empty" }, "type a symbol name"));
+  let t;
+  input.oninput = () => { clearTimeout(t); t = setTimeout(() => input.value.trim() && openSymbol(input.value.trim()), 200); };
+  input.focus();
+}
+
+async function openSymbol(name) {
+  const d = await api(`/api/symbol?name=${encodeURIComponent(name)}`);
+  const view = $("#view");
+  view.replaceChildren(
+    el("h2", {}, name),
+    el("h2", {}, `definitions (${d.matches.length})`),
+    d.matches.length
+      ? el("table", {},
+          el("thead", {}, el("tr", {}, el("th", {}, "kind"), el("th", {}, "location"), el("th", {}, "signature"))),
+          el("tbody", {}, ...d.matches.map((m) =>
+            el("tr", {},
+              el("td", {}, el("span", { className: "tag" }, m.kind)),
+              el("td", { className: "clickable", onclick: () => { show("files"); setTimeout(() => openFile(m.path), 30); } },
+                `${m.path}:${m.startLine}`),
+              el("td", { style: "color:var(--dim)" }, (m.signature ?? "").slice(0, 80))))))
+      : el("div", { className: "empty" }, "no definition found"),
+
+    el("h2", {}, `callers (${d.callers.length})`),
+    el("div", { className: "note" },
+      "heuristic: Tier 1 matches the callee by name, so these are “probably calls this”, not “definitely”"),
+    el("table", {},
+      el("tbody", {}, ...d.callers.map((c) =>
+        el("tr", {},
+          el("td", { className: "clickable", onclick: () => { show("files"); setTimeout(() => openFile(c.path), 30); } },
+            `${c.path}:${c.line}`),
+          el("td", {}, c.caller || el("span", { style: "color:var(--dim)" }, "(file level)")))))),
+
+    el("h2", {}, `calls out (${d.callees.length})`),
+    el("ul", {}, ...d.callees.map((c) =>
+      el("li", { className: "clickable", onclick: () => openSymbol(c.callee) }, c.callee))),
+  );
+}
+
+// ── inspect ──────────────────────────────────────────────────
+async function viewInspect() {
+  const d = await api("/api/internals");
+  const o = state.overview;
+  const total = d.tables.reduce((n, t) => n + t.bytes, 0);
+
+  $("#view").replaceChildren(
+    el("h2", {}, "what is in the index"),
+    el("table", {},
+      el("tbody", {},
+        row("files", fmt(d.totals.files)),
+        row("symbols", fmt(d.totals.symbols)),
+        row("chunk mappings", fmt(d.totals.chunks)),
+        row("unique chunks", fmt(d.totals.uniqueChunks) + dedupeNote(d.totals)),
+        row("edges", fmt(d.totals.edges)))),
+
+    el("h2", {}, "coverage"),
+    el("div", { className: "note" }, "what the index can actually answer — a tier that has not run says 0, it does not pretend"),
+    el("table", {},
+      el("tbody", {},
+        meterRow("lexical", o.coverage.lexical),
+        meterRow("syntactic", o.coverage.syntactic),
+        meterRow("precise (SCIP)", o.coverage.precise, "Phase 2"),
+        meterRow("vectors", o.coverage.vectors, "Phase 3"))),
+
+    el("h2", {}, "storage"),
+    el("div", { className: "note" }, "chunk text is not stored — it lives on disk and every returned span is re-read and verified against it"),
+    el("table", {},
+      el("thead", {}, el("tr", {}, el("th", {}, "table"), el("th", { className: "num" }, "size"), el("th", { style: "width:40%" }, ""))),
+      el("tbody", {}, ...d.tables.slice(0, 12).map((t) =>
+        el("tr", {},
+          el("td", {}, t.name),
+          el("td", { className: "num" }, mb(t.bytes)),
+          el("td", {}, el("div", { className: "meter" }, el("i", { style: `width:${(t.bytes / total) * 100}%` }))))))),
+
+    el("h2", {}, "languages"),
+    el("table", {},
+      el("tbody", {}, ...d.langs.map((l) =>
+        el("tr", {}, el("td", {}, l.lang ?? el("span", { style: "color:var(--dim)" }, "no grammar")), el("td", { className: "num" }, fmt(l.n)))))),
+
+    el("h2", {}, "symbol kinds"),
+    el("table", {},
+      el("tbody", {}, ...d.symbolKinds.map((k) =>
+        el("tr", {}, el("td", {}, k.kind), el("td", { className: "num" }, fmt(k.n)))))),
+
+    ...(d.skipped.length
+      ? [el("h2", {}, "skipped files"),
+         el("div", { className: "note" }, "why a file is not searchable — “it is missing and I do not know why” is a bad answer"),
+         el("table", {}, el("tbody", {}, ...d.skipped.map((s) =>
+           el("tr", {}, el("td", {}, s.skip_reason), el("td", { className: "num" }, fmt(s.n))))))]
+      : []),
+
+    el("h2", {}, "hotspots"),
+    el("div", { className: "note" }, "most symbols per file"),
+    el("table", {},
+      el("tbody", {}, ...(o.hotspots ?? []).map((h) =>
+        el("tr", {},
+          el("td", { className: "clickable", onclick: () => { show("files"); setTimeout(() => openFile(h.path), 30); } }, h.path),
+          el("td", { className: "num" }, fmt(h.symbols)))))),
+  );
+}
+
+const row = (k, v) => el("tr", {}, el("td", {}, k), el("td", { className: "num" }, v));
+const dedupeNote = (t) =>
+  t.chunks > t.uniqueChunks ? `  (${fmt(t.chunks - t.uniqueChunks)} shared by content)` : "";
+const meterRow = (k, v, note) =>
+  el("tr", {},
+    el("td", {}, k, note ? " " : "", note ? el("span", { className: "tag" }, note) : ""),
+    el("td", { className: "num", style: "width:70px" }, Math.round(v * 100) + "%"),
+    el("td", {}, el("div", { className: "meter" }, el("i", { style: `width:${v * 100}%` }))));
+
+boot();
+</script>
+</body>
+</html>

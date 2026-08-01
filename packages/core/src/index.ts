@@ -50,3 +50,9 @@ export {
 } from "./paths.ts";
 export type { RegistryEntry } from "./paths.ts";
 export type { FetchResult } from "./grammars.ts";
+
+export { serveInspector } from "./serve.ts";
+export type { ServeOptions } from "./serve.ts";
+
+export { importGraph, fileDetail, symbolGraph, internals, hotspots } from "./graph.ts";
+export type { Graph, GraphNode, GraphEdge, FileDetail } from "./graph.ts";

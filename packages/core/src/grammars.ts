@@ -35,6 +35,18 @@ export interface FetchResult {
     dir: string;
 }
 
+export interface FetchProgress {
+    /** Language being fetched, or "" once everything is done. */
+    lang: string;
+    /** 0-based index of the current grammar. */
+    index: number;
+    total: number;
+    /** Bytes received for the current grammar. */
+    bytes: number;
+    /** Content-length, or 0 when the server did not send one. */
+    contentLength: number;
+}
+
 /**
  * Download the grammars that are missing.
  *
@@ -43,7 +55,7 @@ export interface FetchResult {
  */
 export async function fetchGrammars(
     which: LangSpec[] = missingGrammars(),
-    onProgress?: (lang: string, done: number, total: number) => void,
+    onProgress?: (p: FetchProgress) => void,
 ): Promise<FetchResult> {
     const dir = grammarCacheDir();
     await mkdir(dir, { recursive: true });
@@ -51,12 +63,41 @@ export async function fetchGrammars(
     const result: FetchResult = { installed: [], failed: [], dir };
 
     for (const [i, spec] of which.entries()) {
-        onProgress?.(spec.lang, i, which.length);
+        const report = (bytes: number, contentLength: number) =>
+            onProgress?.({ lang: spec.lang, index: i, total: which.length, bytes, contentLength });
+
+        report(0, 0);
         try {
             const response = await fetch(`${CDN}/${spec.grammar}`);
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-            const bytes = new Uint8Array(await response.arrayBuffer());
+            // Streamed rather than buffered, so a caller can draw a real
+            // progress bar. Grammars are ~40 MB in total on a cold install —
+            // long enough that silence reads as a hang.
+            const contentLength = Number(response.headers.get("content-length") ?? 0);
+            const chunks: Uint8Array[] = [];
+            let received = 0;
+
+            const reader = response.body?.getReader();
+            if (reader) {
+                for (;;) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    chunks.push(value);
+                    received += value.length;
+                    report(received, contentLength);
+                }
+            } else {
+                chunks.push(new Uint8Array(await response.arrayBuffer()));
+                received = chunks[0]!.length;
+            }
+
+            const bytes = new Uint8Array(received);
+            let offset = 0;
+            for (const chunk of chunks) {
+                bytes.set(chunk, offset);
+                offset += chunk.length;
+            }
             // A .wasm file starts with \0asm. Anything else is an error page.
             if (bytes.length < 8 || bytes[0] !== 0x00 || bytes[1] !== 0x61 || bytes[2] !== 0x73 || bytes[3] !== 0x6d) {
                 throw new Error("response was not a WebAssembly module");
@@ -70,6 +111,6 @@ export async function fetchGrammars(
             result.failed.push({ lang: spec.lang, error: (err as Error).message });
         }
     }
-    onProgress?.("", which.length, which.length);
+    onProgress?.({ lang: "", index: which.length, total: which.length, bytes: 0, contentLength: 0 });
     return result;
 }

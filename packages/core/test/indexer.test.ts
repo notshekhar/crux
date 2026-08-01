@@ -2,9 +2,12 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { openIndex } from "../src/db.ts";
+import { Queue } from "../src/queue.ts";
+import { hashBytes } from "../src/hash.ts";
 import { parseSource } from "../src/parse.ts";
 import { indexFile, removeFile, collectGarbage, synthesizeHeader } from "../src/indexer.ts";
 import { search, lookupSymbol } from "../src/search.ts";
+import { importGraph, fileDetail, symbolGraph, internals } from "../src/graph.ts";
 
 const WS = "/repo";
 
@@ -18,7 +21,21 @@ afterEach(() => db.close());
 async function index(path: string, source: string) {
     const parsed = await parseSource(source, path);
     if (!parsed) throw new Error(`no parser for ${path}`);
-    return indexFile(db, { workspace: WS, path, source, parsed });
+    const stats = indexFile(db, { workspace: WS, path, source, parsed });
+
+    // The worker records file state separately from indexing the content, and
+    // the graph queries read it — so a test that skips this sees an empty index.
+    new Queue(db).markIndexed({
+        workspace: WS,
+        path,
+        hash: hashBytes(source),
+        mtime: Date.now(),
+        size: source.length,
+        readAt: Date.now(),
+        lang: parsed.lang,
+        parseState: parsed.hasErrors ? "errors" : "ok",
+    });
+    return stats;
 }
 
 const RETRY = `
@@ -220,5 +237,62 @@ describe("storage economy", () => {
         expect(count("SELECT count(*) n FROM chunks_fts")).toBe(0);
         expect(count("SELECT count(*) n FROM trigrams")).toBe(0);
         expect(search(db, "validateWebhook", { workspace: WS })).toEqual([]);
+    });
+});
+
+describe("graph queries", () => {
+    test("import edges resolve across files", async () => {
+        await index("src/queue.ts", "export function claim() {}");
+        await index("src/worker.ts", 'import { claim } from "./queue.ts";\nexport function run() { return claim(); }');
+
+        const g = importGraph(db, WS, { granularity: "file" });
+
+        expect(g.edges).toContainEqual(
+            expect.objectContaining({ source: "src/worker.ts", target: "src/queue.ts", kind: "imports" }),
+        );
+    });
+
+    test("a specifier written without its extension still resolves", async () => {
+        await index("src/queue.ts", "export function claim() {}");
+        await index("src/worker.ts", 'import { claim } from "./queue";\nexport const x = claim;');
+
+        expect(importGraph(db, WS, { granularity: "file" }).edges.length).toBeGreaterThan(0);
+    });
+
+    test("files with no import relationships are reported, not silently dropped", async () => {
+        await index("a.ts", "export const a = 1;");
+        await index("b.ts", "export const b = 2;");
+
+        const g = importGraph(db, WS, { granularity: "file" });
+
+        expect(g.nodes).toEqual([]);
+        expect(g.isolated).toBe(2);
+    });
+
+    test("file detail exposes symbols and chunk boundaries", async () => {
+        await index("a.ts", RETRY);
+        const d = fileDetail(db, WS, "a.ts");
+
+        expect(d?.symbols.map((s) => s.name)).toContain("RetryPolicy");
+        expect(d?.chunks.length).toBeGreaterThan(0);
+        expect(fileDetail(db, WS, "nope.ts")).toBeNull();
+    });
+
+    test("symbol lookup is labelled heuristic until SCIP lands", async () => {
+        await index("a.ts", RETRY);
+        const g = symbolGraph(db, WS, "flushBuffer");
+
+        // Tier 1 matches the callee by name, so this must never claim precision.
+        expect(g.precision).toBe("heuristic");
+        expect(g.callers.length).toBeGreaterThan(0);
+    });
+
+    test("internals reports storage and coverage inputs", async () => {
+        await index("a.ts", RETRY);
+        const i = internals(db, WS);
+
+        expect(i.totals.symbols).toBeGreaterThan(0);
+        expect(i.tables.length).toBeGreaterThan(0);
+        expect(i.symbolKinds.some((k) => k.kind === "class")).toBe(true);
     });
 });
