@@ -100,7 +100,26 @@ describe("walking", () => {
 });
 
 describe("the watcher", () => {
-    const settle = () => Bun.sleep(400);
+    /**
+     * Wait for the queue to reach a depth, rather than sleeping a fixed amount.
+     *
+     * FSEvents and inotify deliver on their own schedule, and a loaded CI runner
+     * is far slower than a laptop — a fixed sleep here failed on macOS CI while
+     * passing locally. Poll for the condition, and only give up after a timeout
+     * long enough that a failure means something is genuinely broken.
+     */
+    async function waitForDepth(queue: Queue, expected: number, timeoutMs = 10_000): Promise<number> {
+        const deadline = Date.now() + timeoutMs;
+        let depth = queue.depth().pending;
+        while (Date.now() < deadline && depth < expected) {
+            await Bun.sleep(25);
+            depth = queue.depth().pending;
+        }
+        // Settle briefly so an over-emitting watcher shows up as an over-count
+        // rather than passing because we stopped looking at the right moment.
+        await Bun.sleep(150);
+        return queue.depth().pending;
+    }
 
     test("a save produces exactly one queue row despite several events", async () => {
         const db = openIndex(":memory:");
@@ -114,10 +133,10 @@ describe("the watcher", () => {
         await Bun.$`mv ${join(dir, ".goutputstream-XYZ")} ${target}`.quiet();
         await writeFile(target, "export const a = 2;");
 
-        await settle();
+        const depth = await waitForDepth(queue, 1);
         watcher.stop();
 
-        expect(queue.depth().pending).toBe(1);
+        expect(depth).toBe(1);
         db.close();
     });
 
@@ -131,7 +150,8 @@ describe("the watcher", () => {
         await writeFile(join(dir, "node_modules", "dep.js"), "x");
         await writeFile(join(dir, "bun.lock"), "{}");
 
-        await settle();
+        // Nothing should ever arrive, so give the watcher real time to be wrong.
+        await Bun.sleep(600);
         watcher.stop();
 
         expect(queue.depth().pending).toBe(0);
@@ -150,11 +170,11 @@ describe("the watcher", () => {
             }
         }
 
-        await settle();
+        const depth = await waitForDepth(queue, 3);
         watcher.stop();
 
         // Three distinct dirty files, not fifteen events.
-        expect(queue.depth().pending).toBe(3);
+        expect(depth).toBe(3);
         db.close();
     });
 

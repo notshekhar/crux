@@ -29,9 +29,11 @@ plain modifies. This costs us nothing, because the queue treats an event only as
 dirty" and the hash check in [02-queue](02-queue.md) decides what actually happened. Never
 branch on the event type.
 
-Still open: **`recursive: true` on Linux.** It must be verified in CI on an actual Linux
-runner before Phase 1 closes. If it is unsupported there, the fallback is a watch per directory
-(what `@parcel/watcher` does internally anyway), which reintroduces the inotify limits below.
+**Verified on Linux.** `recursive: true` was the one open risk in this design — it is
+well-supported on macOS but was historically unimplemented on Linux. CI now runs the full
+watcher suite on `ubuntu-latest` as well as `macos-14`, and both pass, so the single-watch
+design holds on both platforms. The inotify notes below still apply to the underlying
+mechanism and to the ENOSPC path.
 
 ### Linux inotify limits — a real failure, not a theoretical one
 

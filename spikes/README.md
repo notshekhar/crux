@@ -75,8 +75,11 @@ changed at 0.25 (`Parser.Language` after `init()` before then, named exports aft
 `.wasm` files are ABI-locked to a runtime range — upgrading one means upgrading both and
 re-testing.
 
-## Still open
+## Open questions, now closed
 
-- **`fs.watch` `recursive: true` on Linux.** Unverified; needs a CI run on a real Linux runner
-  before Phase 1 closes. Fallback is a watch per directory, which reintroduces inotify limits.
-- **`--compile` on non-darwin targets.** Only macOS/arm64 was exercised here.
+Both resolved by CI on the v0.1.0 release:
+
+- **`fs.watch` `recursive: true` on Linux** — confirmed working. The watcher suite passes on
+  `ubuntu-latest` and `macos-14`.
+- **`--compile` on non-darwin targets** — all five targets (darwin arm64/x64, linux arm64/x64,
+  windows x64) cross-compile from a single ubuntu runner and ship as release assets.
