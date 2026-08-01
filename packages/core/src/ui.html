@@ -602,13 +602,16 @@ async function viewInspect() {
 
     el("h2", {}, "storage"),
     el("div", { className: "note" }, "chunk text is not stored — it lives on disk and every returned span is re-read and verified against it"),
-    el("table", {},
-      el("thead", {}, el("tr", {}, el("th", {}, "table"), el("th", { className: "num" }, "size"), el("th", { style: "width:40%" }, ""))),
-      el("tbody", {}, ...d.tables.slice(0, 12).map((t) =>
-        el("tr", {},
-          el("td", {}, t.name),
-          el("td", { className: "num" }, mb(t.bytes)),
-          el("td", {}, el("div", { className: "meter" }, el("i", { style: `width:${(t.bytes / total) * 100}%` }))))))),
+    d.tablesAvailable
+      ? el("table", {},
+          el("thead", {}, el("tr", {}, el("th", {}, "table"), el("th", { className: "num" }, "size"), el("th", { style: "width:40%" }, ""))),
+          el("tbody", {}, ...d.tables.slice(0, 12).map((t) =>
+            el("tr", {},
+              el("td", {}, t.name),
+              el("td", { className: "num" }, mb(t.bytes)),
+              el("td", {}, el("div", { className: "meter" }, el("i", { style: `width:${(t.bytes / total) * 100}%` })))))))
+      : el("div", { className: "empty" },
+          "per-table sizes need SQLite's dbstat module, which this build does not include"),
 
     el("h2", {}, "languages"),
     el("table", {},

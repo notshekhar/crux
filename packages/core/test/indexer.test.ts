@@ -292,7 +292,11 @@ describe("graph queries", () => {
         const i = internals(db, WS);
 
         expect(i.totals.symbols).toBeGreaterThan(0);
-        expect(i.tables.length).toBeGreaterThan(0);
         expect(i.symbolKinds.some((k) => k.kind === "class")).toBe(true);
+
+        // dbstat is optional in SQLite and missing from most Linux builds. The
+        // view degrades to "sizes unavailable" rather than erroring.
+        if (i.tablesAvailable) expect(i.tables.length).toBeGreaterThan(0);
+        else expect(i.tables).toEqual([]);
     });
 });
