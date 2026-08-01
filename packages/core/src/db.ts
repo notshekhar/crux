@@ -9,7 +9,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 3;
 
 const SCHEMA = /* sql */ `
 -- ── Queue and file state (02-queue.md) ──────────────────────────────────────
@@ -68,14 +68,17 @@ CREATE TABLE IF NOT EXISTS leader (
 
 -- ── Content-addressed core (04-storage.md) ──────────────────────────────────
 
+-- Chunk METADATA only. The text itself is not stored: it is already on disk,
+-- and every returned span is re-read and verified against disk anyway
+-- (06-retrieval.md). Storing a second copy cost 34% of the index — 223 MB on a
+-- 21k-file tree — to duplicate bytes we refuse to trust without re-reading.
 CREATE TABLE IF NOT EXISTS chunks (
   content_hash TEXT PRIMARY KEY,
-  header       TEXT NOT NULL,
-  body         TEXT NOT NULL,
-  tokens       TEXT NOT NULL,   -- crux_code expansion; see tokens.ts
+  header       TEXT NOT NULL,   -- synthesized, not derivable from the file alone
   kind         TEXT NOT NULL,
   lang         TEXT,
-  n_tokens     INTEGER
+  n_tokens     INTEGER,
+  rowid_alias  INTEGER          -- stable rowid for the FTS tables to key on
 );
 
 CREATE TABLE IF NOT EXISTS vectors (
@@ -125,57 +128,56 @@ CREATE INDEX IF NOT EXISTS symbols_name_norm ON symbols (workspace, name_norm);
 CREATE INDEX IF NOT EXISTS symbols_path ON symbols (workspace, path);
 CREATE INDEX IF NOT EXISTS symbols_scip ON symbols (workspace, scip_id) WHERE scip_id IS NOT NULL;
 
-CREATE TABLE IF NOT EXISTS edges (
+-- Paths are interned. A tree of 20 repos produced 130k edges, each repeating
+-- the full file path in three columns — 38% of the whole index. An integer
+-- reference costs 8 bytes instead of ~100.
+CREATE TABLE IF NOT EXISTS paths (
+  id        INTEGER PRIMARY KEY,
   workspace TEXT NOT NULL,
-  src       TEXT NOT NULL,
-  dst       TEXT NOT NULL,
+  path      TEXT NOT NULL,
+  UNIQUE (workspace, path)
+);
+
+CREATE TABLE IF NOT EXISTS edges (
+  path_id   INTEGER NOT NULL,   -- the file the edge occurs in
+  src       TEXT NOT NULL,      -- enclosing symbol name, or '' for file-level
+  dst       TEXT NOT NULL,      -- callee name or import specifier
   kind      TEXT NOT NULL,
-  path      TEXT,
   line      INTEGER,
   precision TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS edges_src ON edges (workspace, src, kind);
-CREATE INDEX IF NOT EXISTS edges_dst ON edges (workspace, dst, kind);
+CREATE INDEX IF NOT EXISTS edges_by_path ON edges (path_id);
+CREATE INDEX IF NOT EXISTS edges_src ON edges (src, kind);
+-- The reverse graph — "who calls me" — is the query that makes crux.refs work.
+CREATE INDEX IF NOT EXISTS edges_dst ON edges (dst, kind);
 
 -- ── Full text ───────────────────────────────────────────────────────────────
 
--- the tokens column carries the crux_code expansion (see tokens.ts). A real FTS5
--- tokenizer would need the fts5_api C interface, which bun:sqlite does not
+-- CONTENTLESS: FTS5 keeps its inverted index and nothing else. The source text
+-- lives on disk, which is the only copy we trust. contentless_delete=1
+-- (SQLite >= 3.43) is what makes rows removable without the original text.
+--
+-- The tokens column carries the crux_code expansion (see tokens.ts): a real
+-- FTS5 tokenizer needs the fts5_api C interface, which bun:sqlite does not
 -- expose, so the expansion happens at write time instead.
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
   body, header, tokens,
-  content = 'chunks', content_rowid = 'rowid',
+  content = '', contentless_delete = 1,
   tokenize = 'unicode61'
 );
 
 -- Substring matching: sock_time finds ERR_SOCK_TIMEOUT, which FTS5's normal
 -- tokenizers cannot do and which is how people half-remember identifiers.
+--
+-- Fed only the chunk's IDENTIFIERS, not its full text. Trigram-indexing whole
+-- bodies cost 29% of the index (192 MB on a 21k-file tree) to make prose
+-- substring-searchable, which nobody asks for — the arm exists to find
+-- half-remembered identifiers.
 CREATE VIRTUAL TABLE IF NOT EXISTS trigrams USING fts5(
-  body,
-  content = 'chunks', content_rowid = 'rowid',
+  idents,
+  content = '', contentless_delete = 1,
   tokenize = 'trigram'
 );
-
--- External-content tables are not maintained automatically: without these the
--- index silently drifts from chunks and queries return deleted code.
-CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
-  INSERT INTO chunks_fts (rowid, body, header, tokens) VALUES (new.rowid, new.body, new.header, new.tokens);
-  INSERT INTO trigrams (rowid, body) VALUES (new.rowid, new.body);
-END;
-
-CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-  INSERT INTO chunks_fts (chunks_fts, rowid, body, header, tokens)
-    VALUES ('delete', old.rowid, old.body, old.header, old.tokens);
-  INSERT INTO trigrams (trigrams, rowid, body) VALUES ('delete', old.rowid, old.body);
-END;
-
-CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
-  INSERT INTO chunks_fts (chunks_fts, rowid, body, header, tokens)
-    VALUES ('delete', old.rowid, old.body, old.header, old.tokens);
-  INSERT INTO trigrams (trigrams, rowid, body) VALUES ('delete', old.rowid, old.body);
-  INSERT INTO chunks_fts (rowid, body, header, tokens) VALUES (new.rowid, new.body, new.header, new.tokens);
-  INSERT INTO trigrams (rowid, body) VALUES (new.rowid, new.body);
-END;
 
 -- ── Git / temporal ──────────────────────────────────────────────────────────
 
@@ -252,7 +254,22 @@ export function openIndex(path: string, opts: OpenOptions = {}): Database {
     db.run("PRAGMA synchronous = NORMAL"); // WAL makes FULL unnecessary for a cache
     db.run("PRAGMA foreign_keys = ON");
 
-    if (opts.readonly) return db;
+    const mismatch = (found: string) =>
+        new Error(
+            `This index was written by a different version of crux (schema v${found}, this build expects ` +
+                `v${SCHEMA_VERSION}).\nThe index is a derived cache — delete .crux/ and run crux init to rebuild it.`,
+        );
+
+    // Readers verify the schema too. Skipping the check here let an older
+    // binary open a newer index and return empty results with no error at all,
+    // which is exactly the silent-wrong-answer failure the whole design exists
+    // to prevent.
+    if (opts.readonly) {
+        const found = db.query<{ value: string }, []>("SELECT value FROM meta WHERE key = 'schema_version'").get();
+        if (found && Number(found.value) !== SCHEMA_VERSION) throw mismatch(found.value);
+        return db;
+    }
+
     if (!opts.skipCapabilityCheck) assertCapabilities(db);
 
     db.run(SCHEMA);
@@ -261,10 +278,7 @@ export function openIndex(path: string, opts: OpenOptions = {}): Database {
     if (!found) {
         db.run("INSERT INTO meta (key, value) VALUES ('schema_version', ?)", [String(SCHEMA_VERSION)]);
     } else if (Number(found.value) !== SCHEMA_VERSION) {
-        throw new Error(
-            `Index schema is v${found.value}, this build expects v${SCHEMA_VERSION}. ` +
-                `The index is a derived cache — delete .crux/ and reindex.`,
-        );
+        throw mismatch(found.value);
     }
 
     return db;

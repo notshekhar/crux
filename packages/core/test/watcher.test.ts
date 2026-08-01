@@ -1,11 +1,13 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, mkdir, readdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { loadIgnoreRules, shouldSkipDirectory, MAX_FILE_BYTES } from "../src/ignore.ts";
 import { Watcher, walkWorkspace } from "../src/watcher.ts";
 import { Workspace, nestedRepos } from "../src/workspace.ts";
+import { indexPathFor, listWorkspaces } from "../src/paths.ts";
 import { openIndex } from "../src/db.ts";
 import { Queue } from "../src/queue.ts";
 
@@ -59,6 +61,36 @@ describe("ignore rules", () => {
         expect(rules.shouldSkip("keep.log")).toBeNull();
         expect(rules.shouldSkip("secret/keys.ts")).toBe("gitignored");
         expect(rules.shouldSkip("src/app.ts")).toBeNull();
+    });
+
+    test("each repo's own .gitignore applies to it — and only to it", async () => {
+        // Indexing a folder of many projects is a real use case, and reading
+        // only the root .gitignore silently ignores every project's own rules.
+        await mkdir(join(dir, "repo-a", "src"), { recursive: true });
+        await mkdir(join(dir, "repo-a", "generated"), { recursive: true });
+        await mkdir(join(dir, "repo-b", "src"), { recursive: true });
+        await writeFile(join(dir, "repo-a", ".gitignore"), "generated/\n*.snap\n");
+
+        const rules = loadIgnoreRules(dir);
+
+        expect(rules.shouldSkip("repo-a/generated/big.ts")).toBe("gitignored");
+        expect(rules.shouldSkip("repo-a/src/app.snap")).toBe("gitignored");
+        expect(rules.shouldSkip("repo-a/src/real.ts")).toBeNull();
+
+        // repo-b has no .gitignore, so repo-a's rules must not reach it.
+        expect(rules.shouldSkip("repo-b/src/other.snap")).toBeNull();
+    });
+
+    test("a nested .gitignore can re-include what an ancestor ignored", async () => {
+        await mkdir(join(dir, "pkg"), { recursive: true });
+        await writeFile(join(dir, ".gitignore"), "*.log\n");
+        await writeFile(join(dir, "pkg", ".gitignore"), "!keep.log\n");
+
+        const rules = loadIgnoreRules(dir);
+
+        expect(rules.shouldSkip("other/debug.log")).toBe("gitignored");
+        // The deeper rule is applied last, so its negation wins.
+        expect(rules.shouldSkip("pkg/keep.log")).toBeNull();
     });
 
     test(".cruxignore excludes things the user still wants in git", async () => {
@@ -377,5 +409,40 @@ describe("workspace guards", () => {
         }
 
         expect(await walkWorkspace(dir, undefined, 10)).toHaveLength(10);
+    });
+});
+
+describe("storage layout", () => {
+    test("nothing is written into the repo being indexed", async () => {
+        const home = await mkdtemp(join(tmpdir(), "crux-home-"));
+        const before = process.env.CRUX_HOME_DIR;
+        process.env.CRUX_HOME_DIR = home;
+
+        try {
+            await writeFile(join(dir, "a.ts"), "export const a = 1;");
+            const ws = new Workspace({ root: dir });
+            await ws.coldIndex();
+            await ws.drain();
+            ws.close();
+
+            // A search tool must not create directories or rewrite .gitignore
+            // in a project it was only asked to read.
+            const entries = await readdir(dir);
+            expect(entries).toEqual(["a.ts"]);
+
+            // The index landed under the config dir instead.
+            expect(existsSync(indexPathFor(dir))).toBe(true);
+            expect(listWorkspaces().map((e) => e.workspace)).toContain(dir);
+        } finally {
+            if (before === undefined) delete process.env.CRUX_HOME_DIR;
+            else process.env.CRUX_HOME_DIR = before;
+            await rm(home, { recursive: true, force: true });
+        }
+    });
+
+    test("two repos with the same basename get different indexes", () => {
+        expect(indexPathFor("/a/api")).not.toBe(indexPathFor("/b/api"));
+        // …but the file is still named after the project, so the directory reads well.
+        expect(indexPathFor("/a/api")).toContain("api-");
     });
 });

@@ -28,11 +28,37 @@ crux init .                 # index a repo, print agent config
 crux search "retry webhooks"
 crux symbol RetryPolicy
 crux status                 # what's indexed, how fresh
+crux list                   # every workspace you've indexed
 crux mcp .                  # what your agent runs
 crux upgrade                # update in place
 ```
 
 Uninstall with `CRUX_UNINSTALL=1 bash install.sh`.
+
+## Where it keeps things
+
+Everything lives under `~/.crux` — **nothing is written into the repos you index**:
+
+```
+~/.crux/
+  ├── config.json      settings
+  ├── grammars/        tree-sitter parsers, fetched on first init
+  └── index/
+       ├── registry.json
+       └── <project>-<hash>.db
+```
+
+`crux list` shows every index and its size; `crux forget <path>` deletes one.
+
+## Indexing many repos at once
+
+Point it at a folder of projects and it indexes all of them into one searchable
+index, applying each repo's own `.gitignore`:
+
+```
+crux init ~/code            # 20 repos, 21,415 files, 106s, 588 MB
+crux search "leader election heartbeat" ~/code
+```
 
 Measured on the `loop` repo (469 files, 3.9 MB of TypeScript): cold index 3.4 s at
 138 files/s, 13,455 symbols, query p50 2.1 ms / p95 3.2 ms.

@@ -27,6 +27,7 @@
     "packageManager": "bun@1.4.0",
     "dependencies": {
         "@modelcontextprotocol/sdk": "^1.30.0",
+        "configstore": "^8.0.0",
         "ignore": "^7.0.6",
         "zod": "^4.4.3"
     }

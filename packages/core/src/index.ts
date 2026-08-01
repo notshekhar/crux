@@ -31,10 +31,22 @@ export type { IgnoreRules } from "./ignore.ts";
 export { ParseWorker } from "./worker.ts";
 export type { WorkerOptions, JobOutcome } from "./worker.ts";
 
-export { Workspace, INDEX_RELATIVE_PATH, nestedRepos } from "./workspace.ts";
+export { Workspace, LEGACY_INDEX_RELATIVE_PATH, nestedRepos } from "./workspace.ts";
 export type { WorkspaceOptions, Status } from "./workspace.ts";
 
 export { createMcpServer, serveMcp } from "./mcp.ts";
 
-export { fetchGrammars, missingGrammars, grammarCacheDir, grammarSource, GRAMMAR_PACKAGE_VERSION } from "./grammars.ts";
+export { fetchGrammars, missingGrammars, grammarSource, GRAMMAR_PACKAGE_VERSION } from "./grammars.ts";
+export {
+    configDir,
+    grammarCacheDir,
+    indexDir,
+    indexPathFor,
+    settings,
+    listWorkspaces,
+    rememberWorkspace,
+    forgetWorkspace,
+    CONFIG_DIR_NAME,
+} from "./paths.ts";
+export type { RegistryEntry } from "./paths.ts";
 export type { FetchResult } from "./grammars.ts";

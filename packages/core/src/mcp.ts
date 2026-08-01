@@ -149,7 +149,7 @@ export function createMcpServer(ws: Workspace): McpServer {
             },
         },
         async ({ query, scope, max_tokens }) => {
-            const hits = ws.search(query, { scope, limit: 20 });
+            const hits = ws.search(query, { scope, limit: 20, withText: true });
             const verified = await verify(ws, hits);
             return asText(envelope(ws, pack(verified, max_tokens ?? 4000)));
         },

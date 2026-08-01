@@ -16,6 +16,7 @@ import { Watcher, walkWorkspace } from "./watcher.ts";
 import { ParseWorker } from "./worker.ts";
 import { loadIgnoreRules, type IgnoreRules } from "./ignore.ts";
 import { search, lookupSymbol, type SearchOptions, type Span, type SymbolHit } from "./search.ts";
+import { indexPathFor, rememberWorkspace } from "./paths.ts";
 
 /**
  * Git repositories nested directly inside a directory.
@@ -47,7 +48,11 @@ export async function nestedRepos(root: string, max = 20): Promise<string[]> {
     return found;
 }
 
-export const INDEX_RELATIVE_PATH = join(".crux", "index.db");
+/**
+ * Kept only so an older `.crux/index.db` inside a repo can be detected and
+ * cleaned up. New indexes live under ~/.crux/index — see paths.ts.
+ */
+export const LEGACY_INDEX_RELATIVE_PATH = join(".crux", "index.db");
 
 export interface WorkspaceOptions {
     root: string;
@@ -84,9 +89,10 @@ export class Workspace {
 
     constructor(private readonly opts: WorkspaceOptions) {
         this.root = opts.root;
-        this.db = openIndex(opts.memory ? ":memory:" : join(opts.root, INDEX_RELATIVE_PATH), {
+        this.db = openIndex(opts.memory ? ":memory:" : indexPathFor(opts.root), {
             readonly: opts.readonly && !opts.memory,
         });
+        if (!opts.memory && !opts.readonly) rememberWorkspace(opts.root);
         this.queue = new Queue(this.db);
         this.ignore = loadIgnoreRules(opts.root);
         this.leader = opts.readonly ? null : new Leader(this.db, opts.root);

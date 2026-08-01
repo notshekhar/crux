@@ -134,11 +134,41 @@ function readIgnoreFile(root: string, name: string): string[] {
     }
 }
 
+/** A matcher for one directory's ignore files, or null when it has none. */
+interface DirRules {
+    git: ReturnType<typeof ignoreFactory> | null;
+    crux: ReturnType<typeof ignoreFactory> | null;
+}
+
 export function loadIgnoreRules(root: string): IgnoreRules {
-    // Hand-rolled gitignore matching is always subtly wrong — negations, nested
-    // files, and directory semantics all have sharp edges. Use a real one.
-    const gitignore = ignoreFactory().add(readIgnoreFile(root, ".gitignore"));
-    const cruxignore = ignoreFactory().add(readIgnoreFile(root, ".cruxignore"));
+    /**
+     * Ignore files are per-directory, not per-workspace.
+     *
+     * Git applies a `.gitignore` to its own directory and everything below it,
+     * with patterns matched relative to that directory. Reading only the root
+     * one is wrong for any tree containing more than one project: point crux at
+     * a folder of 20 repos and every repo's own rules are silently ignored,
+     * so their build output and vendored code get indexed.
+     *
+     * Loaded lazily and cached: a directory with no ignore files costs one
+     * failed stat, once.
+     */
+    const byDir = new Map<string, DirRules>();
+
+    function rulesFor(dir: string): DirRules {
+        const cached = byDir.get(dir);
+        if (cached) return cached;
+
+        const gitLines = readIgnoreFile(join(root, dir), ".gitignore");
+        const cruxLines = readIgnoreFile(join(root, dir), ".cruxignore");
+
+        const rules: DirRules = {
+            git: gitLines.length > 0 ? ignoreFactory().add(gitLines) : null,
+            crux: cruxLines.length > 0 ? ignoreFactory().add(cruxLines) : null,
+        };
+        byDir.set(dir, rules);
+        return rules;
+    }
 
     return {
         shouldSkip(relativePath: string): SkipReason | null {
@@ -157,11 +187,37 @@ export function loadIgnoreRules(root: string): IgnoreRules {
             for (const ext of DENY_EXTENSIONS) if (lower.endsWith(ext)) return "denied-extension";
 
             // `ignore` rejects absolute paths and paths escaping the root.
-            if (!relativePath.startsWith("..")) {
-                if (gitignore.ignores(relativePath)) return "gitignored";
-                if (cruxignore.ignores(relativePath)) return "cruxignored";
+            if (relativePath.startsWith("..")) return null;
+
+            // Walk the directory chain from the root down, matching each
+            // directory's rules against the path relative to that directory.
+            //
+            // The deepest rule that has an opinion wins, which is git's
+            // behaviour: a nested `!keep.log` re-includes a file an ancestor's
+            // `*.log` excluded. So this cannot return on the first match — it
+            // has to keep the latest verdict and let deeper levels override it.
+            // `test()` distinguishes "explicitly un-ignored" from "no rule
+            // matched", which `ignores()` alone cannot.
+            let verdict: SkipReason | null = null;
+
+            for (let i = 0; i < segments.length; i++) {
+                const dir = segments.slice(0, i).join("/");
+                const rest = segments.slice(i).join("/");
+                if (rest.length === 0) continue;
+
+                const rules = rulesFor(dir);
+                if (rules.git) {
+                    const r = rules.git.test(rest);
+                    if (r.ignored) verdict = "gitignored";
+                    else if (r.unignored) verdict = null;
+                }
+                if (rules.crux) {
+                    const r = rules.crux.test(rest);
+                    if (r.ignored) verdict = "cruxignored";
+                    else if (r.unignored) verdict = null;
+                }
             }
-            return null;
+            return verdict;
         },
 
         shouldSkipContent(content: string, byteLength: number): SkipReason | null {

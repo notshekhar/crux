@@ -9,7 +9,7 @@
 import type { Database } from "bun:sqlite";
 import type { ParseResult, ParsedSymbol } from "./parse.ts";
 import { hashBytes } from "./hash.ts";
-import { tokenColumn, normalizeName } from "./tokens.ts";
+import { tokenColumn, normalizeName, identifiers } from "./tokens.ts";
 
 export interface IndexInput {
     workspace: string;
@@ -43,9 +43,6 @@ export function synthesizeHeader(args: { path: string; symbol: ParsedSymbol | nu
     lines.push(`lang: ${args.lang}`);
     return lines.join("\n");
 }
-
-/** `path#name` — the fallback edge identifier until SCIP supplies stable ids. */
-const localId = (path: string, name: string) => `${path}#${name}`;
 
 /**
  * Callees that carry no graph signal.
@@ -200,12 +197,21 @@ export function indexFile(db: Database, input: IndexInput): IndexStats {
         // The mapping is path-addressed, so it is rebuilt wholesale.
         db.run("DELETE FROM file_chunks WHERE workspace = ? AND path = ?", [workspace, path]);
         db.run("DELETE FROM symbols WHERE workspace = ? AND path = ?", [workspace, path]);
-        db.run("DELETE FROM edges WHERE workspace = ? AND path = ?", [workspace, path]);
+        db.run("DELETE FROM edges WHERE path_id = (SELECT id FROM paths WHERE workspace = ? AND path = ?)", [
+            workspace,
+            path,
+        ]);
 
+        // Contentless FTS has no triggers to ride on, so rows are written here
+        // explicitly. Only for chunks that are actually new: an existing
+        // content_hash is already indexed, and re-inserting would duplicate it.
         const insertChunk = db.prepare(
-            `INSERT OR IGNORE INTO chunks (content_hash, header, body, tokens, kind, lang, n_tokens)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT OR IGNORE INTO chunks (content_hash, header, kind, lang, n_tokens)
+             VALUES (?, ?, ?, ?, ?)`,
         );
+        const insertFts = db.prepare("INSERT INTO chunks_fts (rowid, body, header, tokens) VALUES (?, ?, ?, ?)");
+        const insertTrigram = db.prepare("INSERT INTO trigrams (rowid, idents) VALUES (?, ?)");
+        const rowidOf = db.prepare<{ rowid: number }, [string]>("SELECT rowid FROM chunks WHERE content_hash = ?");
         const mapChunk = db.prepare(
             `INSERT INTO file_chunks (workspace, path, content_hash, ord, start_line, end_line)
              VALUES (?, ?, ?, ?, ?, ?)`,
@@ -222,13 +228,22 @@ export function indexFile(db: Database, input: IndexInput): IndexStats {
             const changes = insertChunk.run(
                 contentHash,
                 header,
-                body,
-                tokenColumn(`${header}\n${body}`),
                 symbol?.kind ?? "block",
                 parsed.lang,
                 Math.ceil(body.length / 4), // rough token estimate; good enough for packing
             );
-            if (changes.changes === 0) stats.chunksReused++;
+
+            if (changes.changes === 0) {
+                stats.chunksReused++;
+            } else {
+                // New chunk: build its search index. The text is passed through
+                // but never stored — FTS5 keeps only the inverted index.
+                const rowid = rowidOf.get(contentHash)?.rowid;
+                if (rowid !== undefined) {
+                    insertFts.run(rowid, body, header, tokenColumn(`${header}\n${body}`));
+                    insertTrigram.run(rowid, identifiers(body).join(" "));
+                }
+            }
 
             mapChunk.run(workspace, path, contentHash, ord, chunk.startLine, chunk.endLine);
             stats.chunks++;
@@ -258,11 +273,16 @@ export function indexFile(db: Database, input: IndexInput): IndexStats {
         // Tier 1 edges are heuristic by construction: the callee is a name, not
         // a resolved symbol. They are marked as such so `crux.refs` can say
         // "probably calls this" rather than presenting a guess as a fact.
+        db.run("INSERT OR IGNORE INTO paths (workspace, path) VALUES (?, ?)", [workspace, path]);
+        const pathId = db
+            .query<{ id: number }, [string, string]>("SELECT id FROM paths WHERE workspace = ? AND path = ?")
+            .get(workspace, path)!.id;
+
         const insertEdge = db.prepare(
-            "INSERT INTO edges (workspace, src, dst, kind, path, line, precision) VALUES (?, ?, ?, ?, ?, ?, 'heuristic')",
+            "INSERT INTO edges (path_id, src, dst, kind, line, precision) VALUES (?, ?, ?, ?, ?, 'heuristic')",
         );
         for (const imp of parsed.imports) {
-            insertEdge.run(workspace, path, imp.specifier, "imports", path, imp.line);
+            insertEdge.run(pathId, "", imp.specifier, "imports", imp.line);
             stats.edges++;
         }
         const seen = new Set<string>();
@@ -274,7 +294,7 @@ export function indexFile(db: Database, input: IndexInput): IndexStats {
             if (seen.has(pair)) continue;
             seen.add(pair);
 
-            insertEdge.run(workspace, call.from ? localId(path, call.from) : path, call.name, "calls", path, call.line);
+            insertEdge.run(pathId, call.from ?? "", call.name, "calls", call.line);
             stats.edges++;
         }
     })();
@@ -292,7 +312,11 @@ export function removeFile(db: Database, workspace: string, path: string): void 
     db.transaction(() => {
         db.run("DELETE FROM file_chunks WHERE workspace = ? AND path = ?", [workspace, path]);
         db.run("DELETE FROM symbols WHERE workspace = ? AND path = ?", [workspace, path]);
-        db.run("DELETE FROM edges WHERE workspace = ? AND path = ?", [workspace, path]);
+        db.run("DELETE FROM edges WHERE path_id = (SELECT id FROM paths WHERE workspace = ? AND path = ?)", [
+            workspace,
+            path,
+        ]);
+        db.run("DELETE FROM paths WHERE workspace = ? AND path = ?", [workspace, path]);
         db.run("DELETE FROM files WHERE workspace = ? AND path = ?", [workspace, path]);
     })();
 }
@@ -304,6 +328,26 @@ export function removeFile(db: Database, workspace: string, path: string): void 
  * grace period (default 7 days in the plan). Returns the number reclaimed.
  */
 export function collectGarbage(db: Database): number {
-    const result = db.run(`DELETE FROM chunks WHERE content_hash NOT IN (SELECT content_hash FROM file_chunks)`);
-    return result.changes;
+    // Contentless FTS rows must be deleted by rowid before the chunk row goes,
+    // or the inverted index keeps returning hits for code that no longer exists.
+    const dead = db
+        .query<{ rowid: number }, []>(
+            "SELECT rowid FROM chunks WHERE content_hash NOT IN (SELECT content_hash FROM file_chunks)",
+        )
+        .all();
+
+    if (dead.length === 0) return 0;
+
+    db.transaction(() => {
+        const dropFts = db.prepare("DELETE FROM chunks_fts WHERE rowid = ?");
+        const dropTrigram = db.prepare("DELETE FROM trigrams WHERE rowid = ?");
+        const dropChunk = db.prepare("DELETE FROM chunks WHERE rowid = ?");
+        for (const { rowid } of dead) {
+            dropFts.run(rowid);
+            dropTrigram.run(rowid);
+            dropChunk.run(rowid);
+        }
+    })();
+
+    return dead.length;
 }

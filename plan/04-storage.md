@@ -1,20 +1,48 @@
 # 04 — Storage
 
-One SQLite database per workspace at `<workspace>/.crux/index.db`. WAL mode,
+One SQLite database per workspace, stored centrally at
+`~/.crux/index/<name>-<hash>.db`. WAL mode,
 `busy_timeout=5000`, one write connection owned by the leader.
+
+Indexes live under `~/.crux`, not inside the repo. The original design put them at
+`<workspace>/.crux/index.db`, which meant creating a directory in every project and
+**editing the user's `.gitignore`** to hide it — rewriting files in a repo the user only
+asked to search. Central storage also means read-only checkouts work, and `crux list`
+can show every index in one place.
 
 The central design choice: **chunks and vectors are keyed by content hash, not by file
 path.**
+
+## Text is not stored — only its index
+
+`chunks` holds metadata and the synthesized header. It does **not** hold the chunk body.
+
+The body is already on disk, and [06-retrieval](06-retrieval.md) re-reads and verifies
+every returned span against disk before handing it to an agent. Keeping a second copy in
+SQLite cost 34% of the index — 223 MB on a 21k-file tree — to duplicate bytes the design
+already refuses to trust without re-reading.
+
+So both FTS tables are **contentless** (`content=''`, `contentless_delete=1`, SQLite ≥ 3.43):
+FTS5 keeps its inverted index and nothing else. Deleting a chunk means deleting its FTS
+rows by rowid first — there is no external content table to cascade from, and a missed
+delete leaves the index returning hits for code that no longer exists.
+
+The trigram table is fed **identifiers only**, not full bodies. Trigram-indexing whole
+files cost another 29% (192 MB) to make prose substring-searchable, which nobody asks
+for; the arm exists so `sock_time` finds `ERR_SOCK_TIMEOUT`.
+
+Measured on 21,415 files across 20 repositories: **588 MB**, down from a ~2 GB
+trajectory before these three changes.
 
 ## Schema
 
 ```sql
 -- ── Content-addressed core ────────────────────────────────────────────────
 
+-- Metadata only: the body is NOT stored. See "Text is not stored" above.
 CREATE TABLE chunks (
   content_hash TEXT PRIMARY KEY,   -- sha256(header + body), first 128 bits
   header       TEXT NOT NULL,      -- synthesized context (see 05-index-tiers)
-  body         TEXT NOT NULL,
   kind         TEXT NOT NULL,      -- function | class | method | block | prose
   lang         TEXT,
   n_tokens     INTEGER
@@ -61,26 +89,42 @@ CREATE INDEX symbols_name ON symbols (workspace, name);
 CREATE INDEX symbols_path ON symbols (workspace, path);
 CREATE INDEX symbols_scip ON symbols (workspace, scip_id) WHERE scip_id IS NOT NULL;
 
-CREATE TABLE edges (
+-- Paths are interned. 130k edges repeating full paths in three columns was 38%
+-- of the index; an integer reference is 8 bytes instead of ~100.
+CREATE TABLE paths (
+  id        INTEGER PRIMARY KEY,
   workspace TEXT NOT NULL,
-  src       TEXT NOT NULL,        -- scip_id or  path#name  fallback
-  dst       TEXT NOT NULL,
+  path      TEXT NOT NULL,
+  UNIQUE (workspace, path)
+);
+
+CREATE TABLE edges (
+  path_id   INTEGER NOT NULL,     -- the file the edge occurs in
+  src       TEXT NOT NULL,        -- enclosing symbol name, '' for file-level
+  dst       TEXT NOT NULL,        -- callee name or import specifier
   kind      TEXT NOT NULL,        -- calls | imports | implements | extends | references
-  path      TEXT, line INTEGER,   -- where the edge occurs
+  line      INTEGER,
   precision TEXT NOT NULL         -- 'precise' (SCIP) | 'heuristic' (tree-sitter)
 );
-CREATE INDEX edges_src ON edges (workspace, src, kind);
-CREATE INDEX edges_dst ON edges (workspace, dst, kind);   -- reverse graph: "who calls me"
+CREATE INDEX edges_by_path ON edges (path_id);
+CREATE INDEX edges_src ON edges (src, kind);
+CREATE INDEX edges_dst ON edges (dst, kind);   -- reverse graph: "who calls me"
 
 -- ── Full text ─────────────────────────────────────────────────────────────
 
+-- Contentless: the inverted index only, no copy of the text.
 CREATE VIRTUAL TABLE chunks_fts USING fts5(
-  body, header,
-  content = 'chunks', content_rowid = 'rowid',
-  tokenize = 'crux_code'             -- custom tokenizer, see below
+  body, header, tokens,              -- `tokens` = the crux_code expansion, see below
+  content = '', contentless_delete = 1,
+  tokenize = 'unicode61'
 );
 
-CREATE VIRTUAL TABLE trigrams USING fts5(body, tokenize = 'trigram');
+-- Identifiers only, not full bodies.
+CREATE VIRTUAL TABLE trigrams USING fts5(
+  idents,
+  content = '', contentless_delete = 1,
+  tokenize = 'trigram'
+);
 
 -- ── Git / temporal ────────────────────────────────────────────────────────
 
@@ -124,6 +168,9 @@ A chunk is dead when no `file_chunks` row references it. Deleting immediately wo
 the branch-switch cache, so:
 
 - Nightly (or on `crux gc`), delete chunks unreferenced for **> 7 days**, and their vectors.
+- Contentless FTS rows must be deleted **by rowid before** the chunk row: there is no
+  external content table to cascade from, and a missed delete leaves the index matching
+  code that no longer exists.
 - Cap total DB size; when exceeded, evict least-recently-referenced dead chunks first.
 - `VACUUM` on demand only — it takes an exclusive lock and can stall queries.
 

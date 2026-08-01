@@ -8,10 +8,10 @@
  * so the cost of WASM over native is irrelevant here.
  */
 
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { detectLang, type LangSpec, type SymbolKind } from "./lang.ts";
+import { grammarCacheDir } from "./paths.ts";
 
 // web-tree-sitter 0.24 exposes Language only after init(), and moved to named
 // exports at 0.25. Grammars are ABI-locked to a runtime range, so the version is
@@ -77,7 +77,7 @@ export function grammarDir(): string {
     const vendored = join(import.meta.dir, "..", "..", "..", "node_modules", "tree-sitter-wasms", "out");
     if (existsSync(vendored)) return vendored;
 
-    return join(homedir(), ".cache", "crux", "grammars");
+    return grammarCacheDir();
 }
 
 let initialized = false;

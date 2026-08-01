@@ -55,6 +55,29 @@ export function normalizeName(name: string): string {
     return name.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+/**
+ * The distinct identifiers in a chunk, for the trigram arm.
+ *
+ * The trigram index exists so `sock_time` finds `ERR_SOCK_TIMEOUT` — it is for
+ * half-remembered *identifiers*, not for substring-searching prose. Feeding it
+ * whole file bodies cost 29% of the index (192 MB on a 21k-file tree) to
+ * support a query nobody makes.
+ *
+ * Only tokens that look like code identifiers are kept: something with a case
+ * boundary, an underscore, a dot, or SCREAMING_CASE. A plain English word in a
+ * comment is already covered by the BM25 arm.
+ */
+export function identifiers(text: string): string[] {
+    const out = new Set<string>();
+    for (const raw of text.split(NOT_TOKEN)) {
+        if (raw.length < 4 || raw.length > 80) continue;
+        const looksLikeIdentifier =
+            /[a-z][A-Z]/.test(raw) || raw.includes("_") || raw.includes(".") || /^[A-Z0-9_]+$/.test(raw);
+        if (looksLikeIdentifier) out.add(raw.toLowerCase());
+    }
+    return [...out];
+}
+
 /** The value stored in the indexed `tokens` column. */
 export function tokenColumn(text: string): string {
     return tokenize(text).join(" ");

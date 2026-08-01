@@ -13,16 +13,12 @@
 import { mkdir, writeFile, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { LANGUAGES, type LangSpec } from "./lang.ts";
+import { grammarCacheDir } from "./paths.ts";
 
 /** Pinned to match the web-tree-sitter runtime — grammars are ABI-locked to it. */
 export const GRAMMAR_PACKAGE_VERSION = "0.1.13";
 const CDN = `https://cdn.jsdelivr.net/npm/tree-sitter-wasms@${GRAMMAR_PACKAGE_VERSION}/out`;
-
-export function grammarCacheDir(): string {
-    return process.env.CRUX_GRAMMAR_DIR ?? join(homedir(), ".cache", "crux", "grammars");
-}
 
 export function missingGrammars(dir = grammarCacheDir()): LangSpec[] {
     return Object.values(LANGUAGES).filter((spec) => !existsSync(join(dir, spec.grammar)));

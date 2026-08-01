@@ -10,7 +10,6 @@
 
 import { resolve, join } from "node:path";
 import { existsSync } from "node:fs";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 
 import { runUpgrade, getVersion, resolveAvailableUpdate } from "./upgrade.ts";
 import {
@@ -21,7 +20,10 @@ import {
     assertCapabilities,
     UnsupportedSqliteError,
     openIndex,
-    INDEX_RELATIVE_PATH,
+    indexPathFor,
+    configDir,
+    listWorkspaces,
+    forgetWorkspace,
     nestedRepos,
     fetchGrammars,
     missingGrammars,
@@ -56,32 +58,18 @@ async function cmdInit(root: string, force: boolean) {
     say(`${bold("crux")} indexing ${root}`);
     say();
 
-    // Validate the target BEFORE creating anything. Refusing to index a folder
-    // after having written .crux/ and edited its .gitignore leaves a mess in a
-    // directory the user never wanted touched.
-    if (!force) {
-        const repos = await nestedRepos(root);
-        if (repos.length > 1) {
-            say(yellow(`  this directory contains ${repos.length} git repositories`));
-            say(dim(`  ${repos.slice(0, 5).join(", ")}${repos.length > 5 ? ", …" : ""}`));
-            say();
-            say(`  crux indexes one repo at a time — run ${bold("crux init")} inside the one you want.`);
-            say(dim(`  to index everything here anyway: crux init --force`));
-            say();
-            return;
-        }
+    // Indexing a folder of many repos is a legitimate thing to want — one index
+    // that answers questions across every project you have. Say what is about
+    // to happen so the scale is not a surprise, then do it.
+    const repos = await nestedRepos(root);
+    if (repos.length > 1) {
+        say(dim(`  ${repos.length} repositories: ${repos.slice(0, 6).join(", ")}${repos.length > 6 ? ", …" : ""}`));
+        say(dim(`  each repo's own .gitignore is applied`));
+        say();
     }
 
-    await mkdir(join(root, ".crux"), { recursive: true });
-
-    // The index is a derived cache and must never be committed.
-    const gitignore = join(root, ".gitignore");
-    const existing = existsSync(gitignore) ? await readFile(gitignore, "utf8") : "";
-    if (!existing.includes(".crux")) {
-        await appendFile(gitignore, `${existing.endsWith("\n") || existing === "" ? "" : "\n"}.crux/\n`);
-        say(`${dim("added .crux/ to .gitignore")}`);
-    }
-
+    // Nothing is written into the repo — the index lives under ~/.crux, so
+    // there is no directory to create here and no .gitignore to edit.
     // A freshly installed binary has no grammars — they are downloaded rather
     // than bundled, because 40 MB of parsers for languages you do not use is
     // not worth shipping. init is an explicit setup step, so this is the right
@@ -106,16 +94,14 @@ async function cmdInit(root: string, force: boolean) {
         onProgress: (done, total) => process.stdout.write(`\r  indexing ${done}/${total} files`),
     });
 
-    // Secondary guard for a single very large tree (a monorepo, or a home
-    // directory with no repos in it). Cheap: the walk stops at the limit.
+    // A very large tree is allowed, but it should not be a surprise: warn once,
+    // with the escape hatch, rather than silently working for minutes.
     if (!force) {
         const walked = await ws.filesToIndex(LARGE_WORKSPACE_FILES + 1);
         if (walked.length > LARGE_WORKSPACE_FILES) {
-            say(yellow(`  more than ${LARGE_WORKSPACE_FILES.toLocaleString()} files here`));
-            say(dim(`  that will take a while — re-run with --force if it is what you meant`));
+            say(yellow(`  more than ${LARGE_WORKSPACE_FILES.toLocaleString()} files — this will take a few minutes`));
+            say(dim(`  narrow it with a .cruxignore, or press ctrl-c and run inside one project`));
             say();
-            ws.close();
-            return;
         }
     }
 
@@ -201,7 +187,7 @@ async function cmdDoctor(root: string, fetchGrammarsRequested: boolean) {
     else bad(`grammars: ${missing.map((m) => m.lang).join(", ")} missing`, "crux doctor --fetch");
 
     // The index itself.
-    const indexPath = join(root, INDEX_RELATIVE_PATH);
+    const indexPath = indexPathFor(root);
     if (!existsSync(indexPath)) {
         say(`  ${yellow("-")} index not built yet ${dim("run: crux init")}`);
     } else {
@@ -225,6 +211,36 @@ async function cmdDoctor(root: string, fetchGrammarsRequested: boolean) {
     process.exit(problems === 0 ? 0 : 1);
 }
 
+async function cmdList() {
+    const entries = listWorkspaces().sort((a, b) => b.lastUsed - a.lastUsed);
+    if (entries.length === 0) {
+        say(dim("no workspaces indexed yet — run: crux init"));
+        return;
+    }
+
+    say(`${bold("indexed workspaces")} ${dim(configDir())}`);
+    say();
+    let total = 0;
+    for (const e of entries) {
+        const size = existsSync(e.index) ? Bun.file(e.index).size : 0;
+        total += size;
+        const age = Math.floor((Date.now() - e.lastUsed) / 86_400_000);
+        say(`  ${(size / 1e6).toFixed(0).padStart(5)} MB  ${e.workspace}`);
+        say(dim(`            last used ${age === 0 ? "today" : `${age}d ago`}`));
+    }
+    say();
+    say(dim(`  ${(total / 1e6).toFixed(0)} MB total — remove one with: crux forget <path>`));
+}
+
+async function cmdForget(root: string) {
+    const freed = forgetWorkspace(root);
+    if (freed === 0) {
+        say(dim(`no index for ${root}`));
+        return;
+    }
+    say(`${green("✓")} removed the index for ${root} ${dim(`(${(freed / 1e6).toFixed(0)} MB)`)}`);
+}
+
 async function cmdStatus(root: string) {
     const ws = new Workspace({ root, readonly: true });
     const s = ws.status();
@@ -244,6 +260,7 @@ async function cmdStatus(root: string) {
     say(`    precise    ${dim("0%  SCIP lands in Phase 2")}`);
     say(`    vectors    ${dim("0%  embeddings land in Phase 3")}`);
     say();
+    say(dim(`  index at   ${indexPathFor(s.workspace)}`));
     say(dim("  network    none — nothing leaves this machine"));
     ws.close();
 
@@ -259,7 +276,7 @@ async function cmdStatus(root: string) {
 async function cmdSearch(root: string, query: string, limit: number) {
     const ws = new Workspace({ root, readonly: true });
     const started = performance.now();
-    const hits = ws.search(query, { limit });
+    const hits = ws.search(query, { limit, withText: true });
     const ms = performance.now() - started;
 
     if (hits.length === 0) {
@@ -328,11 +345,12 @@ const HELP = `${bold("crux")} — a local-first context engine for coding agents
 
 ${bold("usage")}
   crux init [path]              index a workspace and print agent config
-  crux init --force             index even a very large tree
   crux mcp [path]               serve over MCP on stdio (what agents run)
   crux search <query> [path]    search from the terminal
   crux symbol <name> [path]     look up a symbol
   crux status [path]            what is indexed and how fresh
+  crux list                     every workspace crux has an index for
+  crux forget [path]            delete a workspace's index
   crux doctor [path]            check the install and print fixes
   crux doctor --fetch           download missing language grammars
   crux upgrade                  update crux to the latest release
@@ -380,6 +398,11 @@ async function main() {
             return cmdDoctor(resolve(positional[0] ?? process.cwd()), rest.includes("--fetch"));
         case "status":
             return cmdStatus(resolve(positional[0] ?? process.cwd()));
+        case "list":
+        case "ls":
+            return cmdList();
+        case "forget":
+            return cmdForget(resolve(positional[0] ?? process.cwd()));
         case "search": {
             const query = positional[0];
             if (!query) fail("search needs a query: crux search 'where do we retry webhooks'");

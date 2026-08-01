@@ -12,6 +12,8 @@
  */
 
 import type { Database } from "bun:sqlite";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { toMatchExpression, tokenize, normalizeName } from "./tokens.ts";
 import { spanId } from "./hash.ts";
 
@@ -32,6 +34,12 @@ export interface SearchOptions {
     limit?: number;
     /** Restrict to a path prefix. */
     scope?: string;
+    /**
+     * Read each span's text from disk. Off by default so a ranking-only caller
+     * pays no I/O; the MCP layer turns it on, and re-reads for freshness
+     * anyway.
+     */
+    withText?: boolean;
 }
 
 /** RRF constant. 60 is the value from the original paper and needs no tuning. */
@@ -252,11 +260,27 @@ export function search(db: Database, query: string, opts: SearchOptions): Span[]
 
     const ranked = [...scores.values()].sort((a, b) => b.score - a.score).slice(0, limit);
 
-    const bodyOf = db.prepare<{ body: string }, [string]>("SELECT body FROM chunks WHERE content_hash = ?");
+    // The text is not in the database — it is on disk, which is the only copy
+    // worth trusting. Read lazily and only when asked.
+    const fileCache = new Map<string, string[] | null>();
+    const linesOf = (path: string): string[] | null => {
+        if (!fileCache.has(path)) {
+            try {
+                fileCache.set(path, readFileSync(join(opts.workspace, path), "utf8").split("\n"));
+            } catch {
+                fileCache.set(path, null); // deleted or unreadable — the caller drops it
+            }
+        }
+        return fileCache.get(path) ?? null;
+    };
 
     return ranked.map((entry, i) => {
         const c = entry.candidate;
-        const text = c.contentHash ? (bodyOf.get(c.contentHash)?.body ?? "") : "";
+        const text = opts.withText
+            ? (linesOf(c.path)
+                  ?.slice(c.startLine - 1, c.endLine)
+                  .join("\n") ?? "")
+            : "";
         return {
             id: spanId(c.contentHash ?? c.path, c.path, c.startLine, c.endLine),
             path: c.path,

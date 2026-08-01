@@ -110,7 +110,10 @@ describe("removal and garbage collection", () => {
 
         expect(count("SELECT count(*) n FROM symbols WHERE path = 'a.ts'")).toBe(0);
         expect(count("SELECT count(*) n FROM file_chunks WHERE path = 'a.ts'")).toBe(0);
-        expect(count("SELECT count(*) n FROM edges WHERE path = 'a.ts'")).toBe(0);
+        // Paths are interned, so an edge is reached through the paths table.
+        expect(count("SELECT count(*) n FROM edges WHERE path_id IN (SELECT id FROM paths WHERE path = 'a.ts')")).toBe(
+            0,
+        );
     });
 
     test("removal leaves chunks behind for the branch-switch cache", async () => {
@@ -178,5 +181,44 @@ describe("synthesized headers", () => {
     test("a chunk with no symbol still records where it came from", () => {
         const header = synthesizeHeader({ path: "README.md", lang: "markdown", symbol: null });
         expect(header).toContain("file: README.md");
+    });
+});
+
+describe("storage economy", () => {
+    test("chunk text is not duplicated into the database", async () => {
+        await index("a.ts", RETRY);
+
+        // The source is on disk and every returned span is re-read and verified
+        // against it. A second copy in SQLite cost 34% of the index at scale.
+        const columns = db
+            .query<{ name: string }, []>("PRAGMA table_info(chunks)")
+            .all()
+            .map((c) => c.name);
+        expect(columns).not.toContain("body");
+        expect(columns).not.toContain("tokens");
+    });
+
+    test("search still finds code whose text is only on disk", async () => {
+        await index("a.ts", RETRY);
+        expect(search(db, "validateWebhook", { workspace: WS }).length).toBeGreaterThan(0);
+    });
+
+    test("the trigram index covers identifiers, not prose", async () => {
+        await index("a.ts", "// the quick brown fox jumps over the lazy dog\nexport const ERR_SOCK_TIMEOUT = 1;\n");
+
+        // Identifier substring: the reason this arm exists.
+        expect(search(db, "sock_time", { workspace: WS }).some((h) => h.why.matched.includes("trigram"))).toBe(true);
+        // Prose substring: deliberately not indexed — BM25 covers those words.
+        expect(search(db, "brown", { workspace: WS }).some((h) => h.why.matched.includes("trigram"))).toBe(false);
+    });
+
+    test("gc removes FTS rows too, so deleted code stops matching", async () => {
+        await index("a.ts", RETRY);
+        removeFile(db, WS, "a.ts");
+        collectGarbage(db);
+
+        expect(count("SELECT count(*) n FROM chunks_fts")).toBe(0);
+        expect(count("SELECT count(*) n FROM trigrams")).toBe(0);
+        expect(search(db, "validateWebhook", { workspace: WS })).toEqual([]);
     });
 });

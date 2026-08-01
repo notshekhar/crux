@@ -289,7 +289,11 @@ export class Queue {
             this.db.run("DELETE FROM files WHERE workspace = ? AND path = ?", [workspace, path]);
             this.db.run("DELETE FROM file_chunks WHERE workspace = ? AND path = ?", [workspace, path]);
             this.db.run("DELETE FROM symbols WHERE workspace = ? AND path = ?", [workspace, path]);
-            this.db.run("DELETE FROM edges WHERE workspace = ? AND path = ?", [workspace, path]);
+            this.db.run("DELETE FROM edges WHERE path_id = (SELECT id FROM paths WHERE workspace = ? AND path = ?)", [
+                workspace,
+                path,
+            ]);
+            this.db.run("DELETE FROM paths WHERE workspace = ? AND path = ?", [workspace, path]);
         })();
     }
 }
