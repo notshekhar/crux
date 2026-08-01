@@ -1,0 +1,12 @@
+{
+    "name": "@notshekhar/crux",
+    "version": "0.1.0",
+    "description": "crux — a local-first context engine for coding agents. Live code index served over MCP.",
+    "license": "MIT",
+    "type": "module",
+    "bin": { "crux": "./src/cli.ts" },
+    "files": ["src", "dist"],
+    "dependencies": {
+        "@notshekhar/crux-core": "*"
+    }
+}

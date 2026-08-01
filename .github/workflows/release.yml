@@ -1,0 +1,137 @@
+name: release
+run-name: release ${{ inputs.tag || github.ref_name }} (by @${{ github.actor }})
+
+on:
+    push:
+        tags:
+            - "v*.*.*"
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: "Version tag (e.g. v0.1.0)."
+                required: true
+
+permissions:
+    contents: write
+
+jobs:
+    # ─── Job 1: resolve tag ───────────────────────────────────────────────────
+    prepare:
+        name: prepare
+        runs-on: ubuntu-latest
+        outputs:
+            tag: ${{ steps.tag.outputs.tag }}
+            ver: ${{ steps.tag.outputs.ver }}
+        steps:
+            - name: Resolve tag + version
+              id: tag
+              run: |
+                  tag="${{ github.event.inputs.tag }}"
+                  [ -n "$tag" ] || tag="${GITHUB_REF##*/}"
+                  case "$tag" in v*) ;; *) tag="v$tag" ;; esac
+                  echo "tag=$tag" >> "$GITHUB_OUTPUT"
+                  echo "ver=${tag#v}" >> "$GITHUB_OUTPUT"
+
+    # ─── Job 2: per-target binary build (matrix) ──────────────────────────────
+    # crux has no native modules — the watcher is Bun's built-in fs.watch and
+    # tree-sitter runs as WASM, deliberately so that every target cross-compiles
+    # from a single ubuntu runner. The matrix just parallelizes.
+    build:
+        name: binary (${{ matrix.target }})
+        needs: prepare
+        runs-on: ubuntu-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                target: [darwin-arm64, darwin-x64, linux-x64, linux-arm64, windows-x64]
+        steps:
+            - uses: actions/checkout@v4
+            - uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: latest
+
+            - name: Sync package versions
+              run: |
+                  bun -e "
+                    const fs = require('fs');
+                    for (const p of ['packages/core/package.json','packages/cli/package.json']) {
+                      const j = JSON.parse(fs.readFileSync(p,'utf8'));
+                      j.version = '${{ needs.prepare.outputs.ver }}';
+                      fs.writeFileSync(p, JSON.stringify(j, null, 4) + '\n');
+                    }
+                  "
+
+            - run: bun install --frozen-lockfile
+
+            # Fetching the cross-target Bun runtime is occasionally flaky
+            # ("download may be incomplete"). Three attempts turns a transient
+            # blip into a pass.
+            - name: Build binary
+              run: |
+                  n=0
+                  until bun packages/cli/build-bin.ts bun-${{ matrix.target }}; do
+                    n=$((n + 1))
+                    if [ "$n" -ge 3 ]; then echo "build failed after $n attempts"; exit 1; fi
+                    echo "attempt $n failed — retrying in 5s"; sleep 5
+                  done
+
+            - name: Smoke test binary
+              # Only the native target can actually execute here; the rest are
+              # validated as real, non-trivial binaries for the right platform.
+              run: |
+                  bin="packages/cli/dist/bin/${{ matrix.target }}/crux"
+                  [ -f "${bin}.exe" ] && bin="${bin}.exe"
+                  if [ "${{ matrix.target }}" = "linux-x64" ]; then
+                    "$bin" --version
+                    "$bin" --help > /dev/null
+                  else
+                    file "$bin"
+                    test "$(stat -c%s "$bin")" -gt 10000000
+                  fi
+
+            - name: Compute sha256
+              working-directory: packages/cli/dist/bin
+              run: |
+                  sha256sum "crux-${{ matrix.target }}.tar.gz" > "crux-${{ matrix.target }}.tar.gz.sha256"
+                  ls -lh
+
+            - name: Upload binary artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: bin-${{ matrix.target }}
+                  path: |
+                      packages/cli/dist/bin/crux-${{ matrix.target }}.tar.gz
+                      packages/cli/dist/bin/crux-${{ matrix.target }}.tar.gz.sha256
+                  retention-days: 14
+
+    # ─── Job 3: GitHub Release ────────────────────────────────────────────────
+    release:
+        name: github-release
+        needs: [prepare, build]
+        runs-on: ubuntu-latest
+        steps:
+            - name: Download all binary artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  pattern: bin-*
+                  path: release
+                  merge-multiple: true
+
+            - name: Aggregate SHA256SUMS
+              working-directory: release
+              run: |
+                  ls -lh
+                  : > SHA256SUMS
+                  for f in crux-*.tar.gz; do sha256sum "$f" >> SHA256SUMS; done
+                  cat SHA256SUMS
+
+            - name: Create / update GitHub Release
+              uses: softprops/action-gh-release@v2
+              with:
+                  tag_name: ${{ needs.prepare.outputs.tag }}
+                  name: ${{ needs.prepare.outputs.tag }}
+                  generate_release_notes: true
+                  files: |
+                      release/crux-*.tar.gz
+                      release/crux-*.tar.gz.sha256
+                      release/SHA256SUMS

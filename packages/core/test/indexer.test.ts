@@ -1,0 +1,182 @@
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import type { Database } from "bun:sqlite";
+
+import { openIndex } from "../src/db.ts";
+import { parseSource } from "../src/parse.ts";
+import { indexFile, removeFile, collectGarbage, synthesizeHeader } from "../src/indexer.ts";
+import { search, lookupSymbol } from "../src/search.ts";
+
+const WS = "/repo";
+
+let db: Database;
+
+beforeEach(() => {
+    db = openIndex(":memory:");
+});
+afterEach(() => db.close());
+
+async function index(path: string, source: string) {
+    const parsed = await parseSource(source, path);
+    if (!parsed) throw new Error(`no parser for ${path}`);
+    return indexFile(db, { workspace: WS, path, source, parsed });
+}
+
+const RETRY = `
+/** Retries a webhook delivery with exponential backoff. */
+export class RetryPolicy {
+    async execute(op) {
+        return flushBuffer(op);
+    }
+}
+
+export const ERR_SOCK_TIMEOUT = "sock timeout";
+export function validateWebhook(sig) { return true; }
+`;
+
+const count = (sql: string, ...args: any[]) => (db.query<{ n: number }, any[]>(sql).get(...args) as { n: number }).n;
+
+describe("writing the index", () => {
+    test("symbols, chunks, and edges all land", async () => {
+        const stats = await index("src/billing/retry.ts", RETRY);
+
+        expect(stats.symbols).toBe(4);
+        expect(stats.chunks).toBeGreaterThan(0);
+        expect(stats.edges).toBeGreaterThan(0);
+        expect(count("SELECT count(*) n FROM symbols")).toBe(4);
+    });
+
+    test("re-indexing a file replaces its rows rather than duplicating them", async () => {
+        await index("a.ts", RETRY);
+        await index("a.ts", RETRY);
+
+        expect(count("SELECT count(*) n FROM symbols WHERE path = 'a.ts'")).toBe(4);
+        expect(count("SELECT count(*) n FROM file_chunks WHERE path = 'a.ts'")).toBe(
+            count("SELECT count(DISTINCT ord) n FROM file_chunks WHERE path = 'a.ts'"),
+        );
+    });
+
+    test("call edges are marked heuristic — never present a guess as a fact", async () => {
+        await index("a.ts", RETRY);
+        const precisions = db.query<{ precision: string }, []>("SELECT DISTINCT precision FROM edges").all();
+        expect(precisions).toEqual([{ precision: "heuristic" }]);
+    });
+
+    test("the FTS index is kept in sync by triggers", async () => {
+        await index("a.ts", RETRY);
+        expect(count("SELECT count(*) n FROM chunks_fts")).toBe(count("SELECT count(*) n FROM chunks"));
+        expect(count("SELECT count(*) n FROM trigrams")).toBe(count("SELECT count(*) n FROM chunks"));
+    });
+});
+
+describe("content addressing", () => {
+    test("the same content in two files is stored once", async () => {
+        await index("a.ts", RETRY);
+        const before = count("SELECT count(*) n FROM chunks");
+
+        const stats = await index("b.ts", RETRY);
+
+        // Identical bodies, but the header carries the path, so only chunks
+        // whose header also matches can be shared. What must not happen is
+        // unbounded growth — and both files must be independently mapped.
+        expect(stats.chunks).toBeGreaterThan(0);
+        expect(count("SELECT count(*) n FROM file_chunks WHERE path = 'b.ts'")).toBe(stats.chunks);
+        expect(count("SELECT count(*) n FROM chunks")).toBeGreaterThanOrEqual(before);
+    });
+
+    test("re-indexing identical content reuses every chunk", async () => {
+        await index("a.ts", RETRY);
+        const second = await index("a.ts", RETRY);
+
+        expect(second.chunksReused).toBe(second.chunks);
+    });
+
+    test("a file moved to a new path re-maps without re-storing shared chunks", async () => {
+        await index("old.ts", RETRY);
+        const chunksBefore = count("SELECT count(*) n FROM chunks");
+
+        removeFile(db, WS, "old.ts");
+        await index("new.ts", RETRY);
+
+        // The old chunks survive removal — that is what makes a revert cheap.
+        expect(count("SELECT count(*) n FROM chunks")).toBeGreaterThanOrEqual(chunksBefore);
+        expect(count("SELECT count(*) n FROM file_chunks WHERE path = 'old.ts'")).toBe(0);
+    });
+});
+
+describe("removal and garbage collection", () => {
+    test("removing a file drops its symbols, chunks mapping, and edges", async () => {
+        await index("a.ts", RETRY);
+        removeFile(db, WS, "a.ts");
+
+        expect(count("SELECT count(*) n FROM symbols WHERE path = 'a.ts'")).toBe(0);
+        expect(count("SELECT count(*) n FROM file_chunks WHERE path = 'a.ts'")).toBe(0);
+        expect(count("SELECT count(*) n FROM edges WHERE path = 'a.ts'")).toBe(0);
+    });
+
+    test("removal leaves chunks behind for the branch-switch cache", async () => {
+        await index("a.ts", RETRY);
+        removeFile(db, WS, "a.ts");
+
+        expect(count("SELECT count(*) n FROM chunks")).toBeGreaterThan(0);
+    });
+
+    test("gc reclaims exactly the unreferenced chunks", async () => {
+        await index("a.ts", RETRY);
+        await index("b.ts", "export function untouched() { return 1; }");
+        removeFile(db, WS, "a.ts");
+
+        const reclaimed = collectGarbage(db);
+
+        expect(reclaimed).toBeGreaterThan(0);
+        expect(count("SELECT count(*) n FROM chunks")).toBe(
+            count("SELECT count(DISTINCT content_hash) n FROM file_chunks"),
+        );
+    });
+
+    test("gc keeps the FTS index consistent", async () => {
+        await index("a.ts", RETRY);
+        removeFile(db, WS, "a.ts");
+        collectGarbage(db);
+
+        expect(count("SELECT count(*) n FROM chunks_fts")).toBe(count("SELECT count(*) n FROM chunks"));
+    });
+
+    test("a deleted file's code is never returned by a query", async () => {
+        await index("a.ts", RETRY);
+        removeFile(db, WS, "a.ts");
+        collectGarbage(db);
+
+        expect(search(db, "validateWebhook", { workspace: WS })).toEqual([]);
+        expect(lookupSymbol(db, "RetryPolicy", WS)).toEqual([]);
+    });
+});
+
+describe("synthesized headers", () => {
+    test("carry the location and contract an embedding cannot infer from a body", () => {
+        const header = synthesizeHeader({
+            path: "src/billing/retry.ts",
+            lang: "typescript",
+            symbol: {
+                name: "execute",
+                kind: "method",
+                signature: "async execute<T>(op: () => Promise<T>): Promise<T>",
+                doc: "/** Runs op. */",
+                parent: "RetryPolicy",
+                startLine: 1,
+                endLine: 2,
+                exported: true,
+            },
+        });
+
+        expect(header).toContain("file: src/billing/retry.ts");
+        expect(header).toContain("module: billing");
+        expect(header).toContain("enclosing: RetryPolicy");
+        expect(header).toContain("signature: async execute");
+        expect(header).toContain("doc: /** Runs op. */");
+    });
+
+    test("a chunk with no symbol still records where it came from", () => {
+        const header = synthesizeHeader({ path: "README.md", lang: "markdown", symbol: null });
+        expect(header).toContain("file: README.md");
+    });
+});

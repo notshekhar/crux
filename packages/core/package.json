@@ -1,0 +1,17 @@
+{
+    "name": "@notshekhar/crux-core",
+    "version": "0.0.1",
+    "description": "Core engine for crux — durable queue, leader election, index storage, retrieval.",
+    "license": "MIT",
+    "type": "module",
+    "main": "./src/index.ts",
+    "exports": {
+        ".": {
+            "import": "./src/index.ts"
+        }
+    },
+    "dependencies": {
+        "tree-sitter-wasms": "^0.1.13",
+        "web-tree-sitter": "0.24.7"
+    }
+}

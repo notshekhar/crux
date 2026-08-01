@@ -1,0 +1,53 @@
+name: ci
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+
+jobs:
+    test:
+        name: test (${{ matrix.os }})
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                # Linux is not optional here: fs.watch's `recursive: true` is
+                # verified on macOS but has never been confirmed on Linux, and
+                # the watcher's whole design rests on it. See plan/03-watcher.md.
+                os: [ubuntu-latest, macos-14]
+        steps:
+            - uses: actions/checkout@v4
+            - uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: latest
+
+            - run: bun install --frozen-lockfile
+            - name: Typecheck
+              run: bunx tsc --noEmit
+            - name: Format check
+              run: bunx prettier --check "packages/**/*.ts"
+            - name: Test
+              run: bun test
+
+            # The correctness tests that must never regress, run explicitly so a
+            # failure names itself in the log rather than hiding in the summary.
+            - name: Correctness invariants
+              run: bun test packages/core/test/queue.test.ts packages/core/test/leader.test.ts
+
+    build:
+        name: binary builds
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: latest
+            - run: bun install --frozen-lockfile
+            - name: Compile for the host
+              run: bun packages/cli/build-bin.ts
+            - name: The binary must run without node_modules
+              run: |
+                  cd /tmp
+                  "$GITHUB_WORKSPACE/packages/cli/dist/bin/linux-x64/crux" --version
+                  "$GITHUB_WORKSPACE/packages/cli/dist/bin/linux-x64/crux" doctor /tmp || true

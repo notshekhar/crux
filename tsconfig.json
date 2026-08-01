@@ -1,0 +1,7 @@
+{
+    "extends": "./tsconfig.base.json",
+    "include": ["packages/*/src/**/*.ts", "packages/*/test/**/*.ts", "spikes/**/*.ts"],
+    // Kept as the record of a negative result; its dependency was removed, so it
+    // no longer typechecks. See spikes/README.md.
+    "exclude": ["spikes/native-addon-compile.ts"]
+}

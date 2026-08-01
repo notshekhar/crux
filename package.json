@@ -1,0 +1,33 @@
+{
+    "name": "crux-monorepo",
+    "private": true,
+    "type": "module",
+    "workspaces": [
+        "packages/*"
+    ],
+    "scripts": {
+        "dev": "bun packages/cli/src/cli.ts",
+        "build:bin": "bun packages/cli/build-bin.ts",
+        "bump": "bun scripts/bump-version.ts",
+        "format": "prettier --write .",
+        "format:check": "prettier --check .",
+        "typecheck": "tsc --noEmit",
+        "test": "bun test"
+    },
+    "devDependencies": {
+        "@types/bun": "^1.3.14",
+        "@types/node": "^26.1.2",
+        "prettier": "^3.9.5",
+        "tree-sitter-wasms": "^0.1.13",
+        "web-tree-sitter": "0.24.7"
+    },
+    "engines": {
+        "bun": ">=1.2.0"
+    },
+    "packageManager": "bun@1.4.0",
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.30.0",
+        "ignore": "^7.0.6",
+        "zod": "^4.4.3"
+    }
+}
