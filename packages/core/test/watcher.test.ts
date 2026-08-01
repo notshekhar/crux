@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import { loadIgnoreRules, shouldSkipDirectory, MAX_FILE_BYTES } from "../src/ignore.ts";
 import { Watcher, walkWorkspace } from "../src/watcher.ts";
-import { Workspace } from "../src/workspace.ts";
+import { Workspace, nestedRepos } from "../src/workspace.ts";
 import { openIndex } from "../src/db.ts";
 import { Queue } from "../src/queue.ts";
 
@@ -336,5 +336,34 @@ describe("the whole pipeline", () => {
         expect(status.coverage.vectors).toBe(0);
 
         ws.close();
+    });
+});
+
+describe("workspace guards", () => {
+    test("a folder of git repos is detected, so init can refuse it", async () => {
+        for (const name of ["project-a", "project-b"]) {
+            await mkdir(join(dir, name, ".git"), { recursive: true });
+        }
+        await mkdir(join(dir, "not-a-repo"), { recursive: true });
+
+        expect((await nestedRepos(dir)).sort()).toEqual(["project-a", "project-b"]);
+    });
+
+    test("a directory that is itself a repo reports none", async () => {
+        await mkdir(join(dir, ".git"), { recursive: true });
+        await mkdir(join(dir, "vendored", ".git"), { recursive: true });
+
+        // Submodules and vendored checkouts must not make a real repo look like
+        // a folder of projects.
+        expect(await nestedRepos(dir)).toEqual([]);
+    });
+
+    test("the walk stops at its limit rather than enumerating a huge tree", async () => {
+        await mkdir(join(dir, "src"), { recursive: true });
+        for (let i = 0; i < 50; i++) {
+            await writeFile(join(dir, "src", `f${i}.ts`), "export const x = 1;");
+        }
+
+        expect(await walkWorkspace(dir, undefined, 10)).toHaveLength(10);
     });
 });

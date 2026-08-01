@@ -17,6 +17,36 @@ import { ParseWorker } from "./worker.ts";
 import { loadIgnoreRules, type IgnoreRules } from "./ignore.ts";
 import { search, lookupSymbol, type SearchOptions, type Span, type SymbolHit } from "./search.ts";
 
+/**
+ * Git repositories nested directly inside a directory.
+ *
+ * A far better "did you mean this?" signal than a file count: a folder of
+ * projects is the mistake worth catching, and it is obvious from the repos
+ * inside it rather than from how many files they happen to contain. One index
+ * per repo is the design (01-architecture.md).
+ *
+ * Standalone rather than a Workspace method, so `crux init` can check before
+ * creating anything on disk.
+ */
+export async function nestedRepos(root: string, max = 20): Promise<string[]> {
+    const { readdir } = await import("node:fs/promises");
+    const { existsSync } = await import("node:fs");
+
+    if (existsSync(join(root, ".git"))) return []; // this IS a repo
+
+    const found: string[] = [];
+    try {
+        for (const entry of await readdir(root, { withFileTypes: true })) {
+            if (found.length >= max) break;
+            if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+            if (existsSync(join(root, entry.name, ".git"))) found.push(entry.name);
+        }
+    } catch {
+        // unreadable root — let the walk report it instead
+    }
+    return found;
+}
+
 export const INDEX_RELATIVE_PATH = join(".crux", "index.db");
 
 export interface WorkspaceOptions {
@@ -85,6 +115,15 @@ export class Workspace {
         this.sweeper.unref?.();
 
         return true;
+    }
+
+    /**
+     * The files a cold index would touch, so a caller can sanity-check the
+     * scope first. Pass a limit to stop early — checking "is this too big"
+     * should not cost a full walk of a huge tree.
+     */
+    async filesToIndex(limit?: number): Promise<string[]> {
+        return walkWorkspace(this.root, this.ignore, limit);
     }
 
     /**

@@ -31,7 +31,7 @@ export type { IgnoreRules } from "./ignore.ts";
 export { ParseWorker } from "./worker.ts";
 export type { WorkerOptions, JobOutcome } from "./worker.ts";
 
-export { Workspace, INDEX_RELATIVE_PATH } from "./workspace.ts";
+export { Workspace, INDEX_RELATIVE_PATH, nestedRepos } from "./workspace.ts";
 export type { WorkspaceOptions, Status } from "./workspace.ts";
 
 export { createMcpServer, serveMcp } from "./mcp.ts";

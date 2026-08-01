@@ -208,11 +208,22 @@ export class Watcher {
  * Queries work against the partial index throughout, so this does not need to
  * finish before the watcher starts (03-watcher.md:114).
  */
-export async function walkWorkspace(root: string, ignore: IgnoreRules = loadIgnoreRules(root)): Promise<string[]> {
+export async function walkWorkspace(
+    root: string,
+    ignore: IgnoreRules = loadIgnoreRules(root),
+    /**
+     * Stop after this many files. A caller that only needs to know "is this
+     * bigger than N" must not pay to walk a home directory to find out — the
+     * counting would be the slow thing it was trying to avoid.
+     */
+    limit = Infinity,
+): Promise<string[]> {
     const { readdir } = await import("node:fs/promises");
     const found: string[] = [];
 
     async function descend(dir: string): Promise<void> {
+        if (found.length >= limit) return;
+
         let entries;
         try {
             entries = await readdir(dir, { withFileTypes: true });
@@ -221,6 +232,8 @@ export async function walkWorkspace(root: string, ignore: IgnoreRules = loadIgno
         }
 
         for (const entry of entries) {
+            if (found.length >= limit) return;
+
             const abs = join(dir, entry.name);
             const rel = relative(root, abs).split(sep).join("/");
             if (ignore.shouldSkip(rel)) continue;

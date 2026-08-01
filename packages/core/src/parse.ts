@@ -19,6 +19,14 @@ import { detectLang, type LangSpec, type SymbolKind } from "./lang.ts";
 const ts: any = await import("web-tree-sitter");
 const TSParser = ts.Parser ?? ts.default;
 
+// The tree-sitter RUNTIME wasm (not a grammar) must be embedded in the binary.
+// Emscripten resolves it relative to the script directory, which in a compiled
+// binary is the build machine's node_modules — a released binary died with
+// `ENOENT: /home/runner/work/crux/crux/node_modules/.../tree-sitter.wasm`.
+// `with { type: "file" }` makes Bun embed the bytes and hand back a path that
+// resolves inside the binary at runtime.
+import TREE_SITTER_WASM from "web-tree-sitter/tree-sitter.wasm" with { type: "file" };
+
 export interface ParsedSymbol {
     name: string;
     kind: SymbolKind;
@@ -82,7 +90,10 @@ async function loadLanguage(spec: LangSpec) {
     if (cached) return cached;
 
     if (!initialized) {
-        await TSParser.init();
+        // locateFile is Emscripten's hook for finding tree-sitter.wasm; without
+        // it the runtime looks next to the script, which does not exist once
+        // compiled.
+        await TSParser.init({ locateFile: () => TREE_SITTER_WASM });
         initialized = true;
     }
     const Language = ts.Language ?? TSParser.Language;

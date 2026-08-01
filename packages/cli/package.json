@@ -1,6 +1,6 @@
 {
     "name": "@notshekhar/crux",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "description": "crux — a local-first context engine for coding agents. Live code index served over MCP.",
     "license": "MIT",
     "type": "module",
